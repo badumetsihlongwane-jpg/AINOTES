@@ -1,6 +1,7 @@
 package com.ainotes.studyassistant.feature.workspace
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -126,6 +127,14 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {
+            // Some providers may not grant persistable permission.
+        }
         pendingUpload = resolveUploadDraft(context, uri)
         showUploadDialog = true
     }
