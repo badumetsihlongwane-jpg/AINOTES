@@ -39,8 +39,8 @@ class DefaultStudyRepository(
         )
     }
 
-    override suspend fun addSubject(name: String, description: String, colorHex: String) {
-        database.subjectDao().insert(
+    override suspend fun addSubject(name: String, description: String, colorHex: String): Long {
+        return database.subjectDao().insert(
             SubjectEntity(
                 name = name.trim(),
                 description = description.trim(),

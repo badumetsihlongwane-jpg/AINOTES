@@ -1,20 +1,33 @@
-# AINOTES - Android AI Study App Prototype
+# AINOTES - AI Study Workspace
 
-This repository contains a working Android prototype built with Kotlin, Jetpack Compose, MVVM, and Room.
+AINOTES is an Android study assistant built with Kotlin, Jetpack Compose, MVVM, and Room.
 
-The current scope is feature-first (no AI integration yet), with architecture designed so Gemma 4 or other AI services can be integrated later without refactoring the core app.
+The app now uses a compact single-page workspace design and includes an AI autopilot pipeline that can process uploaded study context and auto-populate subjects, tasks, reminders, notes, quiz checkpoints, and progress updates.
+
+## Product Direction
+
+The goal is to make AI behave like a co-student:
+
+- reads uploaded semester plans and study units
+- maps them into structured academic objects
+- sets reminders and checkpoints
+- proposes quiz moments
+- updates and reports progress back to the learner
 
 ## What Is Implemented
 
-- Home dashboard with live overview of subjects, tasks, notes, files, and upcoming work
-- Subject management
-- Task and assignment management
-- Task progress updates and logging
-- Notes management
-- File metadata capture and storage, including subject/task attachment
-- Reminders with alarm scheduling via AlarmManager + notification receiver
-- Progress screen with summary metrics and history
-- Local persistence with Room and reactive Flow streams
+- Single-page collage workspace UI with floating quick actions
+- Upload Context gateway as the primary intake path
+- Manual create flows: subjects, tasks, notes, reminders
+- AI autopilot flow on upload:
+	- stores file metadata
+	- captures user intent
+	- calls Google Generative Language API
+	- parses strict JSON plan
+	- applies actions into Room (subjects/tasks/reminders/notes/quizzes/progress)
+	- records an AI report note for traceability
+- AlarmManager scheduling for reminders and AI-created quiz alerts
+- Progress tracking with logs
 
 ## Tech Stack
 
@@ -23,31 +36,36 @@ The current scope is feature-first (no AI integration yet), with architecture de
 - Jetpack Compose
 - MVVM
 - Room
+- Google Generative Language API (Gemini endpoint)
+
+## AI Configuration
+
+Do not hardcode API keys in source code.
+
+The app reads these values at build time:
+
+- `GEMINI_API_KEY`
+- `GEMINI_MODEL` (optional, defaults to `gemini-2.0-flash`)
+
+Set them via local Gradle properties or environment variables, for example:
+
+```bash
+export GEMINI_API_KEY="your_key_here"
+export GEMINI_MODEL="gemma-4-26b-a4b-it"
+```
+
+Then build normally with Gradle.
 
 ## Project Structure
 
+- `app/src/main/java/com/ainotes/studyassistant/ai`: AI engine contracts and Gemini implementation
 - `app/src/main/java/com/ainotes/studyassistant/data/local`: Room database, entities, DAOs
-- `app/src/main/java/com/ainotes/studyassistant/data/repository`: Repository implementation
-- `app/src/main/java/com/ainotes/studyassistant/domain`: Repository contracts and dashboard model
-- `app/src/main/java/com/ainotes/studyassistant/feature`: Feature ViewModels and Compose screens
-- `app/src/main/java/com/ainotes/studyassistant/core`: App container, ViewModel factory, navigation, theme
-- `app/src/main/java/com/ainotes/studyassistant/notifications`: Reminder scheduler and alarm receiver
+- `app/src/main/java/com/ainotes/studyassistant/data/repository`: repository implementation
+- `app/src/main/java/com/ainotes/studyassistant/domain`: repository contracts and dashboard model
+- `app/src/main/java/com/ainotes/studyassistant/feature/workspace`: compact workspace UI and orchestration ViewModel
+- `app/src/main/java/com/ainotes/studyassistant/core`: app container and ViewModel factory
+- `app/src/main/java/com/ainotes/studyassistant/notifications`: reminder scheduler and alarm receiver
 
-## Future AI Integration Path
+## Security Note
 
-The code is prepared for future AI actions by centralizing app operations in the repository layer.
-
-Potential AI-capable actions to plug in later:
-
-- create subjects
-- create tasks and study plans
-- summarize notes
-- schedule reminders
-- suggest priority and deadline adjustments
-
-When AI is added, integrate it behind service interfaces called by ViewModels, while keeping Room and UI flows unchanged.
-
-## Notes
-
-- AI and Gemma 4 are intentionally not integrated in this prototype.
-- This repository is structured to build on CI/CD after push.
+If an API key was ever exposed in chat, logs, or source history, rotate it immediately and replace it with a new restricted key.

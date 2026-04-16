@@ -2,6 +2,10 @@ package com.ainotes.studyassistant.feature.workspace
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ainotes.studyassistant.ai.AiProgressPlan
+import com.ainotes.studyassistant.ai.AiStudyPlan
+import com.ainotes.studyassistant.ai.StudyAiEngine
+import com.ainotes.studyassistant.ai.StudyAiInput
 import com.ainotes.studyassistant.data.local.entity.NoteEntity
 import com.ainotes.studyassistant.data.local.entity.ProgressLogEntity
 import com.ainotes.studyassistant.data.local.entity.ReminderEntity
@@ -10,6 +14,7 @@ import com.ainotes.studyassistant.data.local.entity.TaskEntity
 import com.ainotes.studyassistant.data.local.entity.UploadedFileEntity
 import com.ainotes.studyassistant.domain.StudyRepository
 import com.ainotes.studyassistant.notifications.ReminderScheduler
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -33,7 +38,8 @@ data class WorkspaceUiState(
 
 class WorkspaceViewModel(
     private val repository: StudyRepository,
-    private val reminderScheduler: ReminderScheduler
+    private val reminderScheduler: ReminderScheduler,
+    private val aiEngine: StudyAiEngine
 ) : ViewModel() {
 
     private data class WorkspaceBaseState(
@@ -43,6 +49,26 @@ class WorkspaceViewModel(
         val files: List<UploadedFileEntity>,
         val reminders: List<ReminderEntity>
     )
+
+    private data class AppliedPlanStats(
+        val subjects: Int = 0,
+        val tasks: Int = 0,
+        val reminders: Int = 0,
+        val notes: Int = 0,
+        val progressUpdates: Int = 0
+    )
+
+    private val _assistantFeed = MutableStateFlow(
+        if (aiEngine.isConfigured) {
+            "Autopilot is ready. Upload a semester plan to let AI organize your workspace."
+        } else {
+            "Autopilot is off. Configure GEMINI_API_KEY to enable AI planning."
+        }
+    )
+    val assistantFeed: StateFlow<String> = _assistantFeed
+
+    val isAiReady: Boolean
+        get() = aiEngine.isConfigured
 
     val uiState: StateFlow<WorkspaceUiState> = combine(
         repository.subjects,
@@ -138,7 +164,8 @@ class WorkspaceViewModel(
         sizeBytes: Long?,
         subjectId: Long?,
         taskId: Long?,
-        intentText: String
+        intentText: String,
+        useAiAutoplan: Boolean
     ) {
         if (name.isBlank() || uri.isBlank()) return
         viewModelScope.launch {
@@ -157,6 +184,48 @@ class WorkspaceViewModel(
                     content = intentText
                 )
             }
+
+            if (!useAiAutoplan) {
+                _assistantFeed.value = "Context stored. Manual mode kept as requested."
+                return@launch
+            }
+
+            val snapshot = uiState.value
+            val aiResult = aiEngine.generatePlan(
+                StudyAiInput(
+                    fileName = name,
+                    mimeType = mimeType,
+                    intentText = intentText,
+                    existingSubjects = snapshot.subjects.map { it.name },
+                    openTasks = snapshot.tasks.filter { !it.isCompleted }.map { it.title },
+                    upcomingDeadlines = snapshot.upcomingTasks.mapNotNull { task ->
+                        task.dueAt?.let { dueAt -> "${task.title} | $dueAt" }
+                    }
+                )
+            )
+
+            val appliedStats = applyAiPlan(aiResult.plan, snapshot)
+            val report = buildString {
+                appendLine(aiResult.summary)
+                appendLine()
+                appendLine("AI actions applied:")
+                appendLine("Subjects +${appliedStats.subjects}")
+                appendLine("Tasks +${appliedStats.tasks}")
+                appendLine("Reminders +${appliedStats.reminders}")
+                appendLine("Notes +${appliedStats.notes}")
+                appendLine("Progress updates +${appliedStats.progressUpdates}")
+                if (aiResult.isFallback) {
+                    appendLine()
+                    append("Fallback mode: AI response was unavailable or invalid.")
+                }
+            }.trim()
+
+            repository.addNote(
+                subjectId = subjectId,
+                title = "AI Report: $name",
+                content = report
+            )
+            _assistantFeed.value = report
         }
     }
 
@@ -166,5 +235,175 @@ class WorkspaceViewModel(
         viewModelScope.launch {
             repository.updateTaskProgress(taskId, updated, "Quick update from workspace")
         }
+    }
+
+    private suspend fun applyAiPlan(
+        plan: AiStudyPlan,
+        snapshot: WorkspaceUiState
+    ): AppliedPlanStats {
+        val now = System.currentTimeMillis()
+        val subjectIndex = snapshot.subjects
+            .associate { normalizeKey(it.name) to it.id }
+            .toMutableMap()
+        val taskIndex = snapshot.tasks
+            .associate { normalizeKey(it.title) to it.id }
+            .toMutableMap()
+
+        var subjectCount = 0
+        var taskCount = 0
+        var reminderCount = 0
+        var noteCount = 0
+        var progressCount = 0
+
+        for (subject in plan.subjects) {
+            val key = normalizeKey(subject.name)
+            if (key.isBlank() || subjectIndex.containsKey(key)) continue
+            val newId = repository.addSubject(
+                name = subject.name,
+                description = subject.description,
+                colorHex = "#3F6B49"
+            )
+            subjectIndex[key] = newId
+            subjectCount += 1
+        }
+
+        for (task in plan.tasks) {
+            val titleKey = normalizeKey(task.title)
+            if (titleKey.isBlank()) continue
+            val subjectId = ensureSubjectId(task.subjectName, subjectIndex)
+            val dueAt = task.dueAtEpochMillis ?: (now + 5L * 24L * 60L * 60L * 1000L)
+            val taskId = repository.addTask(
+                title = task.title,
+                description = task.description,
+                subjectId = subjectId,
+                dueAt = dueAt,
+                priority = task.priority
+            )
+            taskIndex[titleKey] = taskId
+            taskCount += 1
+
+            val baselineProgress = task.progressPercent
+            if (baselineProgress != null && baselineProgress > 0) {
+                repository.updateTaskProgress(
+                    taskId = taskId,
+                    progressPercent = baselineProgress,
+                    note = "AI baseline progress"
+                )
+                progressCount += 1
+            }
+        }
+
+        for (quiz in plan.quizzes) {
+            val subjectId = ensureSubjectId(quiz.subjectName, subjectIndex)
+            val scheduledAt = quiz.scheduledAtEpochMillis ?: (now + 7L * 24L * 60L * 60L * 1000L)
+            val quizTaskId = repository.addTask(
+                title = "Quiz: ${quiz.title}",
+                description = quiz.description.ifBlank { "AI-generated self test" },
+                subjectId = subjectId,
+                dueAt = scheduledAt,
+                priority = 3
+            )
+            taskIndex[normalizeKey("Quiz: ${quiz.title}")] = quizTaskId
+            taskCount += 1
+
+            val reminderAt = scheduledAt.coerceAtLeast(now + 60_000L)
+            val reminderTitle = "Quiz alert: ${quiz.title}"
+            val reminderId = repository.addReminder(
+                title = reminderTitle,
+                message = "AI prepared this quiz checkpoint for revision.",
+                triggerAt = reminderAt,
+                taskId = quizTaskId,
+                subjectId = subjectId
+            )
+            reminderScheduler.schedule(
+                reminderId = reminderId,
+                title = reminderTitle,
+                message = "AI prepared this quiz checkpoint for revision.",
+                triggerAt = reminderAt
+            )
+            reminderCount += 1
+        }
+
+        for (note in plan.notes) {
+            val subjectId = ensureSubjectId(note.subjectName, subjectIndex)
+            repository.addNote(
+                subjectId = subjectId,
+                title = note.title,
+                content = note.content
+            )
+            noteCount += 1
+        }
+
+        for (reminder in plan.reminders) {
+            val subjectId = ensureSubjectId(reminder.subjectName, subjectIndex)
+            val taskId = reminder.taskTitle
+                ?.let { taskIndex[normalizeKey(it)] }
+            val triggerAt = (reminder.triggerAtEpochMillis ?: (now + 24L * 60L * 60L * 1000L))
+                .coerceAtLeast(now + 60_000L)
+            val reminderId = repository.addReminder(
+                title = reminder.title,
+                message = reminder.message.ifBlank { "AI reminder" },
+                triggerAt = triggerAt,
+                taskId = taskId,
+                subjectId = subjectId
+            )
+            reminderScheduler.schedule(
+                reminderId = reminderId,
+                title = reminder.title,
+                message = reminder.message.ifBlank { "AI reminder" },
+                triggerAt = triggerAt
+            )
+            reminderCount += 1
+        }
+
+        for (progress in plan.progressUpdates) {
+            applyProgressUpdate(progress, taskIndex)?.let {
+                progressCount += 1
+            }
+        }
+
+        return AppliedPlanStats(
+            subjects = subjectCount,
+            tasks = taskCount,
+            reminders = reminderCount,
+            notes = noteCount,
+            progressUpdates = progressCount
+        )
+    }
+
+    private suspend fun applyProgressUpdate(
+        progress: AiProgressPlan,
+        taskIndex: Map<String, Long>
+    ): Unit? {
+        val taskId = taskIndex[normalizeKey(progress.taskTitle)] ?: return null
+        repository.updateTaskProgress(
+            taskId = taskId,
+            progressPercent = progress.progressPercent,
+            note = progress.note.ifBlank { "AI progress update" }
+        )
+        return Unit
+    }
+
+    private suspend fun ensureSubjectId(
+        subjectName: String?,
+        subjectIndex: MutableMap<String, Long>
+    ): Long? {
+        val key = normalizeKey(subjectName.orEmpty())
+        if (key.isBlank()) return null
+
+        val existing = subjectIndex[key]
+        if (existing != null) return existing
+
+        val created = repository.addSubject(
+            name = subjectName.orEmpty(),
+            description = "Created by AI from uploaded context",
+            colorHex = "#3F6B49"
+        )
+        subjectIndex[key] = created
+        return created
+    }
+
+    private fun normalizeKey(value: String): String {
+        return value.trim().lowercase()
     }
 }

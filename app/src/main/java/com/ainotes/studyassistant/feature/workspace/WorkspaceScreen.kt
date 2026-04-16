@@ -44,6 +44,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -62,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ainotes.studyassistant.core.util.formatEpochDate
 import com.ainotes.studyassistant.core.util.formatEpochDateTime
+import com.ainotes.studyassistant.data.local.entity.TaskEntity
 import kotlinx.coroutines.launch
 
 data class UploadDraft(
@@ -71,9 +73,17 @@ data class UploadDraft(
     val sizeBytes: Long?
 )
 
+private enum class TaskSortLens {
+    Soon,
+    Module,
+    Momentum
+}
+
 @Composable
 fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
     val state = viewModel.uiState.collectAsStateWithLifecycle().value
+    val assistantFeed = viewModel.assistantFeed.collectAsStateWithLifecycle().value
+    val aiReady = viewModel.isAiReady
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -84,6 +94,32 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
     var showReminderDialog by remember { mutableStateOf(false) }
     var pendingUpload by remember { mutableStateOf<UploadDraft?>(null) }
     var showUploadDialog by remember { mutableStateOf(false) }
+    var sortLens by remember { mutableStateOf(TaskSortLens.Soon) }
+
+    val spotlightTasks = remember(state.tasks, state.subjects, sortLens) {
+        when (sortLens) {
+            TaskSortLens.Soon -> state.tasks
+                .filter { !it.isCompleted }
+                .sortedBy { it.dueAt ?: Long.MAX_VALUE }
+                .take(5)
+
+            TaskSortLens.Module -> {
+                val subjectNames = state.subjects.associateBy({ it.id }, { it.name })
+                state.tasks
+                    .filter { !it.isCompleted }
+                    .sortedWith(
+                        compareBy<TaskEntity> { subjectNames[it.subjectId].orEmpty() }
+                            .thenBy { it.dueAt ?: Long.MAX_VALUE }
+                    )
+                    .take(5)
+            }
+
+            TaskSortLens.Momentum -> state.tasks
+                .filter { !it.isCompleted }
+                .sortedByDescending { it.progressPercent }
+                .take(5)
+        }
+    }
 
     val context = androidx.compose.ui.platform.LocalContext.current
     val filePicker = rememberLauncherForActivityResult(
@@ -166,19 +202,26 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    WorkspaceHeroCard(state = state)
+                    WorkspaceHeroCard(state = state, sortLens = sortLens, onSortLensChange = { sortLens = it })
                 }
 
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    ContextGatewayCard(latestFileName = state.files.firstOrNull()?.name)
+                    ContextGatewayCard(
+                        latestFileName = state.files.firstOrNull()?.name,
+                        aiReady = aiReady
+                    )
+                }
+
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    AssistantPulseCard(message = assistantFeed)
                 }
 
                 item {
-                    CollageCard(title = "Upcoming") {
-                        if (state.upcomingTasks.isEmpty()) {
+                    CollageCard(title = "Focus Queue") {
+                        if (spotlightTasks.isEmpty()) {
                             Text("No upcoming deadlines", style = MaterialTheme.typography.bodySmall)
                         } else {
-                            state.upcomingTasks.take(3).forEach { task ->
+                            spotlightTasks.take(3).forEach { task ->
                                 Text(task.title, fontWeight = FontWeight.SemiBold)
                                 Text(
                                     "Due ${formatEpochDate(task.dueAt)}",
@@ -335,7 +378,7 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                 showUploadDialog = false
                 pendingUpload = null
             },
-            onSubmit = { subjectId, taskId, intentText ->
+            onSubmit = { subjectId, taskId, intentText, useAiAutoplan ->
                 val draft = pendingUpload ?: return@UploadContextDialog
                 viewModel.addUploadedContext(
                     name = draft.name,
@@ -344,10 +387,16 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                     sizeBytes = draft.sizeBytes,
                     subjectId = subjectId,
                     taskId = taskId,
-                    intentText = intentText
+                    intentText = intentText,
+                    useAiAutoplan = useAiAutoplan
                 )
                 scope.launch {
-                    snackbarHostState.showSnackbar("Context uploaded and linked to your workspace")
+                    val notice = if (useAiAutoplan) {
+                        "Context uploaded. AI autopilot started."
+                    } else {
+                        "Context uploaded in manual mode."
+                    }
+                    snackbarHostState.showSnackbar(notice)
                 }
                 showUploadDialog = false
                 pendingUpload = null
@@ -357,7 +406,11 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
 }
 
 @Composable
-private fun WorkspaceHeroCard(state: WorkspaceUiState) {
+private fun WorkspaceHeroCard(
+    state: WorkspaceUiState,
+    sortLens: TaskSortLens,
+    onSortLensChange: (TaskSortLens) -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
@@ -378,12 +431,29 @@ private fun WorkspaceHeroCard(state: WorkspaceUiState) {
                 StatTag(label = "Open", value = state.openTaskCount)
                 StatTag(label = "Files", value = state.files.size)
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(
+                    onClick = { onSortLensChange(TaskSortLens.Soon) },
+                    label = { Text("Soon") },
+                    enabled = sortLens != TaskSortLens.Soon
+                )
+                AssistChip(
+                    onClick = { onSortLensChange(TaskSortLens.Module) },
+                    label = { Text("Module") },
+                    enabled = sortLens != TaskSortLens.Module
+                )
+                AssistChip(
+                    onClick = { onSortLensChange(TaskSortLens.Momentum) },
+                    label = { Text("Momentum") },
+                    enabled = sortLens != TaskSortLens.Momentum
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun ContextGatewayCard(latestFileName: String?) {
+private fun ContextGatewayCard(latestFileName: String?, aiReady: Boolean) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
@@ -403,6 +473,32 @@ private fun ContextGatewayCard(latestFileName: String?) {
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFFCBD3CC)
             )
+            Text(
+                text = if (aiReady) "Autopilot mode: READY" else "Autopilot mode: NOT CONFIGURED",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (aiReady) Color(0xFF9BEAAE) else Color(0xFFFFC9A7)
+            )
+        }
+    }
+}
+
+@Composable
+private fun AssistantPulseCard(message: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F0E6), contentColor = Color(0xFF2B2A26))
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text("Assistant Pulse", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "AI acts like a co-student: organizes content, tracks progress, and reports actions here.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(message, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -551,13 +647,14 @@ private fun ReminderDialog(
 private fun UploadContextDialog(
     draft: UploadDraft,
     onDismiss: () -> Unit,
-    onSubmit: (Long?, Long?, String) -> Unit
+    onSubmit: (Long?, Long?, String, Boolean) -> Unit
 ) {
     var intentText by remember {
         mutableStateOf("Use this file to support my study tasks and generate better plans later.")
     }
     var subjectId by remember { mutableStateOf("") }
     var taskId by remember { mutableStateOf("") }
+    var autopilotEnabled by remember { mutableStateOf(true) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -583,10 +680,30 @@ private fun UploadContextDialog(
                     onValueChange = { taskId = it },
                     label = { Text("Task ID (optional)") }
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Let AI auto-organize this upload")
+                    Switch(
+                        checked = autopilotEnabled,
+                        onCheckedChange = { autopilotEnabled = it }
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSubmit(subjectId.toLongOrNull(), taskId.toLongOrNull(), intentText) }) {
+            TextButton(
+                onClick = {
+                    onSubmit(
+                        subjectId.toLongOrNull(),
+                        taskId.toLongOrNull(),
+                        intentText,
+                        autopilotEnabled
+                    )
+                }
+            ) {
                 Text("Save Context")
             }
         },

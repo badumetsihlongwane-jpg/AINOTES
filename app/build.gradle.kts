@@ -4,6 +4,24 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val localProperties = java.util.Properties().apply {
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) {
+        localFile.inputStream().use { load(it) }
+    }
+}
+
+fun escapedBuildConfig(value: String): String {
+    return value.replace("\\", "\\\\").replace("\"", "\\\"")
+}
+
+fun resolveConfigValue(key: String, defaultValue: String = ""): String {
+    return (project.findProperty(key) as? String)
+        ?: System.getenv(key)
+        ?: localProperties.getProperty(key)
+        ?: defaultValue
+}
+
 android {
     namespace = "com.ainotes.studyassistant"
     compileSdk = 35
@@ -19,6 +37,12 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        val geminiApiKey = resolveConfigValue("GEMINI_API_KEY")
+        val geminiModel = resolveConfigValue("GEMINI_MODEL", "gemini-2.0-flash")
+
+        buildConfigField("String", "GEMINI_API_KEY", "\"${escapedBuildConfig(geminiApiKey)}\"")
+        buildConfigField("String", "GEMINI_MODEL", "\"${escapedBuildConfig(geminiModel)}\"")
     }
 
     buildTypes {
@@ -39,6 +63,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"

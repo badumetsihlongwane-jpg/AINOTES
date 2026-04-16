@@ -2,6 +2,7 @@ package com.ainotes.studyassistant.core
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import com.ainotes.studyassistant.ai.StudyAiEngine
 import com.ainotes.studyassistant.domain.StudyRepository
 import com.ainotes.studyassistant.feature.files.FilesViewModel
 import com.ainotes.studyassistant.feature.home.HomeViewModel
@@ -15,7 +16,8 @@ import com.ainotes.studyassistant.notifications.ReminderScheduler
 
 class StudyViewModelFactory(
     private val repository: StudyRepository,
-    private val reminderScheduler: ReminderScheduler
+    private val reminderScheduler: ReminderScheduler,
+    private val aiEngine: StudyAiEngine
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -30,7 +32,7 @@ class StudyViewModelFactory(
             }
             modelClass.isAssignableFrom(ProgressViewModel::class.java) -> ProgressViewModel(repository) as T
             modelClass.isAssignableFrom(WorkspaceViewModel::class.java) -> {
-                WorkspaceViewModel(repository, reminderScheduler) as T
+                WorkspaceViewModel(repository, reminderScheduler, aiEngine) as T
             }
             else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }

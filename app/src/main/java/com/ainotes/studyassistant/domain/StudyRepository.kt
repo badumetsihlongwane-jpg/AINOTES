@@ -25,7 +25,7 @@ interface StudyRepository {
     val progressLogs: Flow<List<ProgressLogEntity>>
     val dashboard: Flow<DashboardSnapshot>
 
-    suspend fun addSubject(name: String, description: String, colorHex: String)
+    suspend fun addSubject(name: String, description: String, colorHex: String): Long
     suspend fun addTask(
         title: String,
         description: String,

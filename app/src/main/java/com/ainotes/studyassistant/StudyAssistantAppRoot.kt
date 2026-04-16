@@ -10,7 +10,13 @@ import com.ainotes.studyassistant.feature.workspace.WorkspaceViewModel
 
 @Composable
 fun StudyAssistantAppRoot(container: AppContainer) {
-    val factory = remember { StudyViewModelFactory(container.repository, container.reminderScheduler) }
+    val factory = remember {
+        StudyViewModelFactory(
+            repository = container.repository,
+            reminderScheduler = container.reminderScheduler,
+            aiEngine = container.aiEngine
+        )
+    }
     val vm: WorkspaceViewModel = viewModel(factory = factory)
     WorkspaceScreen(viewModel = vm)
 }

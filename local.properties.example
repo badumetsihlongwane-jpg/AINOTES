@@ -1,0 +1,6 @@
+# Copy this file to local.properties for local Android Studio builds.
+# Never commit real secrets.
+
+# sdk.dir=/path/to/android/sdk
+GEMINI_API_KEY=replace_with_your_key
+GEMINI_MODEL=gemma-4-26b-a4b-it
