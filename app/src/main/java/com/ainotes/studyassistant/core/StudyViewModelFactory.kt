@@ -10,6 +10,7 @@ import com.ainotes.studyassistant.feature.progress.ProgressViewModel
 import com.ainotes.studyassistant.feature.reminders.RemindersViewModel
 import com.ainotes.studyassistant.feature.subjects.SubjectsViewModel
 import com.ainotes.studyassistant.feature.tasks.TasksViewModel
+import com.ainotes.studyassistant.feature.workspace.WorkspaceViewModel
 import com.ainotes.studyassistant.notifications.ReminderScheduler
 
 class StudyViewModelFactory(
@@ -28,6 +29,9 @@ class StudyViewModelFactory(
                 RemindersViewModel(repository, reminderScheduler) as T
             }
             modelClass.isAssignableFrom(ProgressViewModel::class.java) -> ProgressViewModel(repository) as T
+            modelClass.isAssignableFrom(WorkspaceViewModel::class.java) -> {
+                WorkspaceViewModel(repository, reminderScheduler) as T
+            }
             else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }
     }
