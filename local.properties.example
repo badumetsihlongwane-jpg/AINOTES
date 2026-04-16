@@ -2,5 +2,9 @@
 # Never commit real secrets.
 
 # sdk.dir=/path/to/android/sdk
-GEMINI_API_KEY=replace_with_your_key
+HF_TOKEN=replace_with_hf_token
+HF_MODEL=google/gemma-4-31B-it:novita
+
+# Optional fallback provider
+GEMINI_API_KEY=
 GEMINI_MODEL=gemini-flash-latest

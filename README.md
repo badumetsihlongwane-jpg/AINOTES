@@ -22,7 +22,8 @@ The goal is to make AI behave like a co-student:
 - AI autopilot flow on upload:
 	- stores file metadata
 	- captures user intent
-	- calls Google Generative Language API
+	- calls Hugging Face Router (OpenAI-compatible chat completions)
+	- falls back to Gemini when HF token is not configured
 	- parses strict JSON plan
 	- applies actions into Room (subjects/tasks/reminders/notes/quizzes/progress)
 	- records an AI report note for traceability
@@ -36,7 +37,8 @@ The goal is to make AI behave like a co-student:
 - Jetpack Compose
 - MVVM
 - Room
-- Google Generative Language API (Gemini endpoint)
+- Hugging Face Router API (primary)
+- Google Generative Language API (fallback)
 
 ## AI Configuration
 
@@ -44,13 +46,17 @@ Do not hardcode API keys in source code.
 
 The app reads these values at build time:
 
+- `HF_TOKEN`
+- `HF_MODEL` (optional, defaults to `google/gemma-4-31B-it:novita`)
 - `GEMINI_API_KEY`
-- `GEMINI_MODEL` (optional, defaults to `gemini-flash-latest`)
+- `GEMINI_MODEL` (optional fallback, defaults to `gemini-flash-latest`)
 
 Set them via local Gradle properties or environment variables, for example:
 
 ```bash
-export GEMINI_API_KEY="your_key_here"
+export HF_TOKEN="your_huggingface_token"
+export HF_MODEL="google/gemma-4-31B-it:novita"
+export GEMINI_API_KEY="optional_fallback_key"
 export GEMINI_MODEL="gemini-flash-latest"
 ```
 
@@ -58,7 +64,7 @@ Then build normally with Gradle.
 
 ## Project Structure
 
-- `app/src/main/java/com/ainotes/studyassistant/ai`: AI engine contracts and Gemini implementation
+- `app/src/main/java/com/ainotes/studyassistant/ai`: AI engine contracts and Hugging Face/Gemini implementations
 - `app/src/main/java/com/ainotes/studyassistant/data/local`: Room database, entities, DAOs
 - `app/src/main/java/com/ainotes/studyassistant/data/repository`: repository implementation
 - `app/src/main/java/com/ainotes/studyassistant/domain`: repository contracts and dashboard model

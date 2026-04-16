@@ -45,9 +45,13 @@ android {
 
         val geminiApiKey = resolveConfigValue("GEMINI_API_KEY")
         val geminiModel = resolveConfigValue("GEMINI_MODEL", "gemini-flash-latest")
+        val hfToken = resolveConfigValue("HF_TOKEN")
+        val hfModel = resolveConfigValue("HF_MODEL", "google/gemma-4-31B-it:novita")
 
         buildConfigField("String", "GEMINI_API_KEY", "\"${escapedBuildConfig(geminiApiKey)}\"")
         buildConfigField("String", "GEMINI_MODEL", "\"${escapedBuildConfig(geminiModel)}\"")
+        buildConfigField("String", "HF_TOKEN", "\"${escapedBuildConfig(hfToken)}\"")
+        buildConfigField("String", "HF_MODEL", "\"${escapedBuildConfig(hfModel)}\"")
     }
 
     buildTypes {

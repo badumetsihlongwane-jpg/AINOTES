@@ -62,7 +62,7 @@ class WorkspaceViewModel(
         if (aiEngine.isConfigured) {
             "Autopilot is ready. Upload a semester plan to let AI organize your workspace."
         } else {
-            "Autopilot is off. Configure GEMINI_API_KEY to enable AI planning."
+            "Autopilot is off. Configure HF_TOKEN (or GEMINI_API_KEY fallback) to enable AI planning."
         }
     )
     val assistantFeed: StateFlow<String> = _assistantFeed
