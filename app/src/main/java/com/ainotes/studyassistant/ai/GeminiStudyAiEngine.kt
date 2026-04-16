@@ -5,7 +5,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
-import java.net.URLEncoder
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.time.Instant
@@ -29,34 +28,53 @@ class GeminiStudyAiEngine(
         }
 
         try {
-            val endpoint = buildEndpoint(model, apiKey)
             val requestBody = buildRequestBody(input)
-            val response = postJson(endpoint, requestBody)
-            if (response.code !in 200..299) {
-                return@withContext fallbackResult(
-                    summary = "AI request failed with HTTP ${response.code}. File saved without autoplan.",
-                    raw = response.body
+            val candidates = modelCandidates(model)
+
+            for ((index, candidateModel) in candidates.withIndex()) {
+                val endpoint = buildEndpoint(candidateModel, apiKey)
+                val response = postJson(endpoint, requestBody)
+
+                if (response.code !in 200..299) {
+                    val canRetryWithAnotherModel = response.code == 404 && index < candidates.lastIndex
+                    if (canRetryWithAnotherModel) {
+                        continue
+                    }
+
+                    return@withContext fallbackResult(
+                        summary = buildFailureSummary(
+                            statusCode = response.code,
+                            model = candidateModel,
+                            errorMessage = extractErrorMessage(response.body)
+                        ),
+                        raw = response.body
+                    )
+                }
+
+                val generatedText = extractCandidateText(response.body)
+                if (generatedText.isBlank()) {
+                    return@withContext fallbackResult(
+                        summary = "AI returned an empty response. File saved without autoplan.",
+                        raw = response.body
+                    )
+                }
+
+                val payload = extractJsonPayload(generatedText)
+                val plan = parsePlan(payload)
+                val summary = payload.optString("summary").ifBlank {
+                    "AI organized your workspace from ${input.fileName}."
+                }
+                return@withContext AiStudyPlanResult(
+                    summary = summary,
+                    plan = plan,
+                    rawResponse = generatedText,
+                    isFallback = false
                 )
             }
 
-            val generatedText = extractCandidateText(response.body)
-            if (generatedText.isBlank()) {
-                return@withContext fallbackResult(
-                    summary = "AI returned an empty response. File saved without autoplan.",
-                    raw = response.body
-                )
-            }
-
-            val payload = extractJsonPayload(generatedText)
-            val plan = parsePlan(payload)
-            val summary = payload.optString("summary").ifBlank {
-                "AI organized your workspace from ${input.fileName}."
-            }
-            AiStudyPlanResult(
-                summary = summary,
-                plan = plan,
-                rawResponse = generatedText,
-                isFallback = false
+            fallbackResult(
+                summary = "AI request failed: no usable model was found.",
+                raw = null
             )
         } catch (error: Exception) {
             fallbackResult(
@@ -69,8 +87,46 @@ class GeminiStudyAiEngine(
     private data class HttpResponse(val code: Int, val body: String)
 
     private fun buildEndpoint(model: String, key: String): String {
-        val encodedModel = URLEncoder.encode(model, StandardCharsets.UTF_8.name())
-        return "https://generativelanguage.googleapis.com/v1beta/models/$encodedModel:generateContent?key=$key"
+        val normalized = model.trim().removePrefix("models/")
+        return "https://generativelanguage.googleapis.com/v1beta/models/$normalized:generateContent?key=$key"
+    }
+
+    private fun modelCandidates(configuredModel: String): List<String> {
+        val normalized = configuredModel.trim().removePrefix("models/")
+        val primary = normalized.ifBlank { "gemini-flash-latest" }
+        return listOf(
+            primary,
+            "gemini-flash-latest",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash-latest"
+        ).distinct()
+    }
+
+    private fun extractErrorMessage(body: String): String {
+        return runCatching {
+            JSONObject(body)
+                .optJSONObject("error")
+                ?.optString("message")
+                .orEmpty()
+                .trim()
+        }.getOrDefault("")
+    }
+
+    private fun buildFailureSummary(statusCode: Int, model: String, errorMessage: String): String {
+        val details = errorMessage.ifBlank { "No additional error details." }
+        return when (statusCode) {
+            404 -> {
+                "AI model '$model' was not found (HTTP 404). " +
+                    "Set GEMINI_MODEL to a valid model like gemini-flash-latest. $details"
+            }
+            401, 403 -> {
+                "AI authentication failed (HTTP $statusCode). " +
+                    "Check GEMINI_API_KEY and API access. $details"
+            }
+            else -> {
+                "AI request failed with HTTP $statusCode on model '$model'. $details"
+            }
+        }
     }
 
     private fun buildRequestBody(input: StudyAiInput): String {

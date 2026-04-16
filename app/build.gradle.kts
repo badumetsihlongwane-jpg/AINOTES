@@ -44,7 +44,7 @@ android {
         }
 
         val geminiApiKey = resolveConfigValue("GEMINI_API_KEY")
-        val geminiModel = resolveConfigValue("GEMINI_MODEL", "gemini-2.0-flash")
+        val geminiModel = resolveConfigValue("GEMINI_MODEL", "gemini-flash-latest")
 
         buildConfigField("String", "GEMINI_API_KEY", "\"${escapedBuildConfig(geminiApiKey)}\"")
         buildConfigField("String", "GEMINI_MODEL", "\"${escapedBuildConfig(geminiModel)}\"")

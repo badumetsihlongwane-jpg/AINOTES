@@ -3,4 +3,4 @@
 
 # sdk.dir=/path/to/android/sdk
 GEMINI_API_KEY=replace_with_your_key
-GEMINI_MODEL=gemma-4-26b-a4b-it
+GEMINI_MODEL=gemini-flash-latest

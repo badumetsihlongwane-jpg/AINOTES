@@ -45,13 +45,13 @@ Do not hardcode API keys in source code.
 The app reads these values at build time:
 
 - `GEMINI_API_KEY`
-- `GEMINI_MODEL` (optional, defaults to `gemini-2.0-flash`)
+- `GEMINI_MODEL` (optional, defaults to `gemini-flash-latest`)
 
 Set them via local Gradle properties or environment variables, for example:
 
 ```bash
 export GEMINI_API_KEY="your_key_here"
-export GEMINI_MODEL="gemma-4-26b-a4b-it"
+export GEMINI_MODEL="gemini-flash-latest"
 ```
 
 Then build normally with Gradle.
