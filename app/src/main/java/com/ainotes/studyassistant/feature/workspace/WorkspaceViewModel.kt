@@ -36,31 +36,48 @@ class WorkspaceViewModel(
     private val reminderScheduler: ReminderScheduler
 ) : ViewModel() {
 
+    private data class WorkspaceBaseState(
+        val subjects: List<SubjectEntity>,
+        val tasks: List<TaskEntity>,
+        val notes: List<NoteEntity>,
+        val files: List<UploadedFileEntity>,
+        val reminders: List<ReminderEntity>
+    )
+
     val uiState: StateFlow<WorkspaceUiState> = combine(
         repository.subjects,
         repository.tasks,
         repository.notes,
         repository.files,
-        repository.reminders,
-        repository.progressLogs
-    ) { subjects, tasks, notes, files, reminders, logs ->
-        val now = System.currentTimeMillis()
-        val averageProgress = if (tasks.isEmpty()) 0 else tasks.map { it.progressPercent }.average().roundToInt()
-        WorkspaceUiState(
+        repository.reminders
+    ) { subjects, tasks, notes, files, reminders ->
+        WorkspaceBaseState(
             subjects = subjects,
             tasks = tasks,
             notes = notes,
             files = files,
-            reminders = reminders,
+            reminders = reminders
+        )
+    }.combine(repository.progressLogs) { base, logs ->
+        val now = System.currentTimeMillis()
+        val averageProgress = if (base.tasks.isEmpty()) 0 else {
+            base.tasks.map { it.progressPercent }.average().roundToInt()
+        }
+        WorkspaceUiState(
+            subjects = base.subjects,
+            tasks = base.tasks,
+            notes = base.notes,
+            files = base.files,
+            reminders = base.reminders,
             progressLogs = logs,
             averageProgress = averageProgress,
-            openTaskCount = tasks.count { !it.isCompleted },
-            completedTaskCount = tasks.count { it.isCompleted },
-            upcomingTasks = tasks
+            openTaskCount = base.tasks.count { !it.isCompleted },
+            completedTaskCount = base.tasks.count { it.isCompleted },
+            upcomingTasks = base.tasks
                 .filter { it.dueAt != null && (it.dueAt ?: 0) >= now && !it.isCompleted }
                 .sortedBy { it.dueAt }
                 .take(5),
-            upcomingReminders = reminders
+            upcomingReminders = base.reminders
                 .filter { it.triggerAt >= now }
                 .sortedBy { it.triggerAt }
                 .take(5)
