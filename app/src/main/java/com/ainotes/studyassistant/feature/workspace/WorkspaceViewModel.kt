@@ -147,13 +147,19 @@ class WorkspaceViewModel(
                     (force || now - lastAiRunAt >= AI_REASONING_COOLDOWN_MILLIS)
 
                 if (canRunAiReasoning) {
+                    val subjectNameById = snapshot.subjects.associate { it.id to it.name }
                     val aiResult = aiEngine.generatePlan(
                         StudyAiInput(
                             fileName = "autonomous-check-in.txt",
                             mimeType = "text/plain",
-                            intentText = "Autonomous agent review. Without waiting for user prompting, identify weak performance, upcoming tests/quizzes, and deadlines. Create useful notes, reminders, quiz drills, and progress interventions.",
+                            intentText = "Autonomous morning planner. Build module-aware actions, prioritize upcoming tests/quizzes, and avoid duplicate reminders/tasks. Use clear names like '[Module] Practice Quiz - Topic'.",
                             existingSubjects = snapshot.subjects.map { it.name },
-                            openTasks = snapshot.tasks.filter { !it.isCompleted }.map { it.title },
+                            openTasks = snapshot.tasks
+                                .filter { !it.isCompleted }
+                                .map { task ->
+                                    val moduleName = task.subjectId?.let { subjectNameById[it] } ?: "General"
+                                    "[$moduleName] ${task.title}"
+                                },
                             upcomingDeadlines = snapshot.upcomingTasks.mapNotNull { task ->
                                 task.dueAt?.let { dueAt -> "${task.title} | $dueAt" }
                             }
@@ -269,13 +275,25 @@ class WorkspaceViewModel(
             }
 
             val snapshot = uiState.value
+            val subjectNameById = snapshot.subjects.associate { it.id to it.name }
+            val enhancedIntent = buildString {
+                append(intentText)
+                appendLine()
+                appendLine()
+                append("Use explicit module labels and avoid creating duplicate tasks/reminders that already exist.")
+            }.trim()
             val aiResult = aiEngine.generatePlan(
                 StudyAiInput(
                     fileName = name,
                     mimeType = mimeType,
-                    intentText = intentText,
+                    intentText = enhancedIntent,
                     existingSubjects = snapshot.subjects.map { it.name },
-                    openTasks = snapshot.tasks.filter { !it.isCompleted }.map { it.title },
+                    openTasks = snapshot.tasks
+                        .filter { !it.isCompleted }
+                        .map { task ->
+                            val moduleName = task.subjectId?.let { subjectNameById[it] } ?: "General"
+                            "[$moduleName] ${task.title}"
+                        },
                     upcomingDeadlines = snapshot.upcomingTasks.mapNotNull { task ->
                         task.dueAt?.let { dueAt -> "${task.title} | $dueAt" }
                     }
@@ -318,6 +336,7 @@ class WorkspaceViewModel(
 
     private suspend fun applyRuleBasedInterventions(snapshot: WorkspaceUiState): AppliedPlanStats {
         val now = System.currentTimeMillis()
+        val subjectNameById = snapshot.subjects.associate { it.id to it.name }
         val noteKeys = snapshot.notes.map { normalizeKey(it.title) }.toMutableSet()
         val reminderKeys = snapshot.reminders.map { normalizeKey(it.title) }.toMutableSet()
         val taskKeys = snapshot.tasks.map { normalizeKey(it.title) }.toMutableSet()
@@ -336,7 +355,8 @@ class WorkspaceViewModel(
             .sortedBy { it.dueAt }
 
         for (task in highRiskTasks.take(3)) {
-            val noteTitle = "AI Recovery Plan: ${task.title}"
+            val moduleName = task.subjectId?.let { subjectNameById[it] } ?: "General"
+            val noteTitle = "Study Recovery Plan - [$moduleName] ${task.title}"
             if (noteKeys.add(normalizeKey(noteTitle))) {
                 val dueDate = task.dueAt?.let { epoch ->
                     Instant.ofEpochMilli(epoch)
@@ -357,13 +377,13 @@ class WorkspaceViewModel(
                 noteCount += 1
             }
 
-            val reminderTitle = "AI Check-in: ${task.title}"
+            val reminderTitle = "Action Reminder - [$moduleName] ${task.title}"
             if (reminderKeys.add(normalizeKey(reminderTitle))) {
                 val triggerAt = ((task.dueAt ?: now + DAY) - 12L * HOUR)
                     .coerceAtLeast(now + 15L * MINUTE)
                 val reminderId = repository.addReminder(
                     title = reminderTitle,
-                    message = "Your task needs attention. Quick review sprint now.",
+                    message = "This action needs attention today. Run a focused revision sprint.",
                     triggerAt = triggerAt,
                     taskId = task.id,
                     subjectId = task.subjectId
@@ -371,7 +391,7 @@ class WorkspaceViewModel(
                 reminderScheduler.schedule(
                     reminderId = reminderId,
                     title = reminderTitle,
-                    message = "Your task needs attention. Quick review sprint now.",
+                    message = "This action needs attention today. Run a focused revision sprint.",
                     triggerAt = triggerAt
                 )
                 reminderCount += 1
@@ -383,24 +403,29 @@ class WorkspaceViewModel(
             .minByOrNull { it.progressPercent }
 
         if (quizTarget != null) {
-            val quizTitle = "Quiz Drill: ${quizTarget.title}"
+            val moduleName = quizTarget.subjectId?.let { subjectNameById[it] } ?: "General"
+            val quizTitle = if (isAssessmentLike(quizTarget.title)) {
+                "Revision Sprint - [$moduleName] ${quizTarget.title}"
+            } else {
+                "Practice Quiz - [$moduleName] ${quizTarget.title}"
+            }
             if (taskKeys.add(normalizeKey(quizTitle))) {
                 val dueAt = (quizTarget.dueAt ?: now + 2L * DAY).coerceAtLeast(now + 6L * HOUR)
                 val quizTaskId = repository.addTask(
                     title = quizTitle,
-                    description = "AI generated this drill from weak progress patterns.",
+                    description = "Auto-generated from weak progress patterns for this module.",
                     subjectId = quizTarget.subjectId,
                     dueAt = dueAt,
                     priority = 3
                 )
                 taskCount += 1
 
-                val reminderTitle = "Quiz Prep: ${quizTarget.title}"
+                val reminderTitle = "Prep Reminder - [$moduleName] ${quizTarget.title}"
                 if (reminderKeys.add(normalizeKey(reminderTitle))) {
                     val triggerAt = (dueAt - 3L * HOUR).coerceAtLeast(now + 30L * MINUTE)
                     val reminderId = repository.addReminder(
                         title = reminderTitle,
-                        message = "AI quiz drill ready. Attempt before deadline.",
+                        message = "Practice quiz is ready. Attempt before the deadline.",
                         triggerAt = triggerAt,
                         taskId = quizTaskId,
                         subjectId = quizTarget.subjectId
@@ -408,7 +433,7 @@ class WorkspaceViewModel(
                     reminderScheduler.schedule(
                         reminderId = reminderId,
                         title = reminderTitle,
-                        message = "AI quiz drill ready. Attempt before deadline.",
+                        message = "Practice quiz is ready. Attempt before the deadline.",
                         triggerAt = triggerAt
                     )
                     reminderCount += 1
@@ -460,10 +485,12 @@ class WorkspaceViewModel(
         }
 
         for (task in plan.tasks) {
-            val titleKey = normalizeKey(task.title)
+            val rawTitleKey = normalizeKey(task.title)
+            val sanitizedTitle = sanitizePlanTaskTitle(task.title, task.subjectName)
+            val titleKey = normalizeKey(sanitizedTitle)
             if (titleKey.isBlank()) continue
 
-            val existingTaskId = taskIndex[titleKey]
+            val existingTaskId = taskIndex[titleKey] ?: taskIndex[rawTitleKey]
             if (existingTaskId != null) {
                 val baselineProgress = task.progressPercent
                 if (baselineProgress != null && baselineProgress > 0) {
@@ -480,13 +507,14 @@ class WorkspaceViewModel(
             val subjectId = ensureSubjectId(task.subjectName, subjectIndex)
             val dueAt = task.dueAtEpochMillis ?: (now + 5L * DAY)
             val taskId = repository.addTask(
-                title = task.title,
+                title = sanitizedTitle,
                 description = task.description,
                 subjectId = subjectId,
                 dueAt = dueAt,
                 priority = task.priority
             )
             taskIndex[titleKey] = taskId
+            taskIndex[rawTitleKey] = taskId
             taskCount += 1
 
             val baselineProgress = task.progressPercent
@@ -501,9 +529,11 @@ class WorkspaceViewModel(
         }
 
         for (quiz in plan.quizzes) {
-            val quizTitle = "Quiz: ${quiz.title}"
+            val rawQuizTitle = "Quiz: ${quiz.title}"
+            val quizTitle = sanitizePlanQuizTitle(quiz.title, quiz.subjectName)
             val quizKey = normalizeKey(quizTitle)
-            val existingQuizTaskId = taskIndex[quizKey]
+            val rawQuizKey = normalizeKey(rawQuizTitle)
+            val existingQuizTaskId = taskIndex[quizKey] ?: taskIndex[rawQuizKey]
             val subjectId = ensureSubjectId(quiz.subjectName, subjectIndex)
             val scheduledAt = quiz.scheduledAtEpochMillis ?: (now + 7L * DAY)
 
@@ -518,11 +548,15 @@ class WorkspaceViewModel(
                     priority = 3
                 )
                 taskIndex[quizKey] = createdId
+                taskIndex[rawQuizKey] = createdId
                 taskCount += 1
                 createdId
             }
 
-            val reminderTitle = "Quiz alert: ${quiz.title}"
+            val reminderTitle = sanitizeReminderTitle(
+                title = "Quiz reminder: ${quiz.title}",
+                subjectName = quiz.subjectName
+            )
             val reminderKey = normalizeKey(reminderTitle)
             if (reminderIndex.add(reminderKey)) {
                 val reminderAt = scheduledAt.coerceAtLeast(now + MINUTE)
@@ -556,16 +590,20 @@ class WorkspaceViewModel(
         }
 
         for (reminder in plan.reminders) {
-            val reminderKey = normalizeKey(reminder.title)
+            val normalizedTitle = sanitizeReminderTitle(reminder.title, reminder.subjectName)
+            val reminderKey = normalizeKey(normalizedTitle)
             if (reminderKey.isBlank() || !reminderIndex.add(reminderKey)) continue
 
             val subjectId = ensureSubjectId(reminder.subjectName, subjectIndex)
             val taskId = reminder.taskTitle
-                ?.let { taskIndex[normalizeKey(it)] }
+                ?.let { linkedTitle ->
+                    taskIndex[normalizeKey(linkedTitle)]
+                        ?: taskIndex[normalizeKey(sanitizePlanTaskTitle(linkedTitle, reminder.subjectName))]
+                }
             val triggerAt = (reminder.triggerAtEpochMillis ?: (now + DAY))
                 .coerceAtLeast(now + MINUTE)
             val reminderId = repository.addReminder(
-                title = reminder.title,
+                title = normalizedTitle,
                 message = reminder.message.ifBlank { "AI reminder" },
                 triggerAt = triggerAt,
                 taskId = taskId,
@@ -573,7 +611,7 @@ class WorkspaceViewModel(
             )
             reminderScheduler.schedule(
                 reminderId = reminderId,
-                title = reminder.title,
+                title = normalizedTitle,
                 message = reminder.message.ifBlank { "AI reminder" },
                 triggerAt = triggerAt
             )
@@ -643,10 +681,10 @@ class WorkspaceViewModel(
         aiReasoningRan: Boolean
     ): String {
         return buildString {
-            appendLine("Agent check-in complete.")
+            appendLine("Morning planner check-in complete.")
             appendLine(aiSummary)
             appendLine()
-            appendLine("Actions this cycle:")
+            appendLine("What changed:")
             appendLine("Subjects +${stats.subjects}")
             appendLine("Tasks +${stats.tasks}")
             appendLine("Reminders +${stats.reminders}")
@@ -661,6 +699,49 @@ class WorkspaceViewModel(
                 }
             )
         }.trim()
+    }
+
+    private fun sanitizePlanTaskTitle(title: String, subjectName: String?): String {
+        val cleaned = title.trim().replace(Regex("\\s+"), " ")
+        if (cleaned.isBlank()) return cleaned
+
+        val module = subjectName.orEmpty().trim()
+        val hasModulePrefix = module.isNotBlank() && cleaned.contains("[$module]", ignoreCase = true)
+        return when {
+            module.isBlank() -> cleaned
+            hasModulePrefix -> cleaned
+            else -> "[$module] $cleaned"
+        }
+    }
+
+    private fun sanitizePlanQuizTitle(title: String, subjectName: String?): String {
+        val module = subjectName.orEmpty().trim()
+        val cleaned = title.trim().replace(Regex("\\s+"), " ")
+        return if (module.isBlank()) {
+            "Practice Quiz - $cleaned"
+        } else {
+            "Practice Quiz - [$module] $cleaned"
+        }
+    }
+
+    private fun sanitizeReminderTitle(title: String, subjectName: String?): String {
+        val cleaned = title.trim().replace(Regex("\\s+"), " ")
+        if (cleaned.isBlank()) return cleaned
+
+        val module = subjectName.orEmpty().trim()
+        return if (module.isBlank() || cleaned.contains("[$module]", ignoreCase = true)) {
+            cleaned
+        } else {
+            "[$module] $cleaned"
+        }
+    }
+
+    private fun isAssessmentLike(title: String): Boolean {
+        val normalized = title.lowercase()
+        return normalized.contains("quiz") ||
+            normalized.contains("test") ||
+            normalized.contains("exam") ||
+            normalized.contains("assessment")
     }
 
     private fun reportTimestamp(): String {

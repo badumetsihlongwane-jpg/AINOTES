@@ -16,15 +16,12 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -33,7 +30,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Alarm
-import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.AssignmentTurnedIn
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CloudUpload
@@ -78,11 +74,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ainotes.studyassistant.core.util.formatEpochDate
 import com.ainotes.studyassistant.core.util.formatEpochDateTime
+import com.ainotes.studyassistant.data.local.entity.NoteEntity
+import com.ainotes.studyassistant.data.local.entity.TaskEntity
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.absoluteValue
 
 data class UploadDraft(
     val name: String,
@@ -92,21 +91,32 @@ data class UploadDraft(
 )
 
 private enum class FeaturePanel {
-    Tasks,
-    Notes,
+    Focus,
+    Assessments,
+    Modules,
+    AiPlan,
     Reminders,
-    Subjects,
-    Files,
-    Progress
+    Library
 }
 
-private data class FeatureCardUi(
+private data class OverviewCardUi(
     val panel: FeaturePanel,
     val title: String,
     val icon: ImageVector,
     val accent: Color,
     val stat: String,
     val preview: List<String>
+)
+
+private data class FocusItemUi(
+    val taskId: Long,
+    val title: String,
+    val moduleName: String,
+    val typeLabel: String,
+    val urgencyLabel: String,
+    val progressPercent: Int,
+    val dueAt: Long?,
+    val description: String
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -151,7 +161,32 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
         showUploadDialog = true
     }
 
-    val cards = buildFeatureCards(state)
+    val subjectNameById = remember(state.subjects) {
+        state.subjects.associate { it.id to it.name }
+    }
+    val focusItems = remember(state.tasks, state.subjects) {
+        buildFocusItems(state.tasks, subjectNameById)
+    }
+    val assessmentTasks = remember(state.tasks) {
+        state.tasks.filter { task -> !task.isCompleted && classifyTaskType(task).contains("assessment", ignoreCase = true) }
+            .sortedBy { it.dueAt ?: Long.MAX_VALUE }
+    }
+    val aiReports = remember(state.notes) {
+        state.notes.filter { note ->
+            val title = note.title.lowercase()
+            title.startsWith("ai ") || title.startsWith("agent ") || title.contains("report")
+        }.sortedByDescending { it.updatedAt }
+    }
+
+    val overviewCards = buildOverviewCards(
+        state = state,
+        subjectNameById = subjectNameById,
+        assistantFeed = assistantFeed,
+        focusItems = focusItems,
+        assessmentTasks = assessmentTasks,
+        aiReports = aiReports
+    )
+
     val todayLabel = remember {
         LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE, dd MMM"))
     }
@@ -163,7 +198,7 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
             ExtendedFloatingActionButton(
                 onClick = { filePicker.launch(arrayOf("*/*")) },
                 icon = { Icon(Icons.Filled.CloudUpload, contentDescription = "Upload context") },
-                text = { Text("Upload Context") },
+                text = { Text("Upload Unit / Plan") },
                 containerColor = Color(0xFF255C43),
                 contentColor = Color.White
             )
@@ -189,10 +224,18 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 item(span = { GridItemSpan(2) }) {
-                    DashboardHeader(
+                    DashboardHeroCard(
                         todayLabel = todayLabel,
-                        openTaskCount = state.openTaskCount,
-                        upcomingReminderCount = state.upcomingReminders.size
+                        focusCount = focusItems.size,
+                        assessmentCount = assessmentTasks.size,
+                        openTaskCount = state.openTaskCount
+                    )
+                }
+
+                item(span = { GridItemSpan(2) }) {
+                    FocusNowCard(
+                        items = focusItems.take(3),
+                        onOpenAll = { selectedPanel = FeaturePanel.Focus }
                     )
                 }
 
@@ -214,8 +257,8 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                     )
                 }
 
-                items(cards, key = { it.title }) { card ->
-                    DashboardFeatureCard(
+                items(overviewCards, key = { it.title }) { card ->
+                    OverviewFeatureCard(
                         card = card,
                         onClick = { selectedPanel = card.panel }
                     )
@@ -229,6 +272,11 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
             FeatureDetailSheet(
                 panel = panel,
                 state = state,
+                subjectNameById = subjectNameById,
+                assistantFeed = assistantFeed,
+                focusItems = focusItems,
+                assessmentTasks = assessmentTasks,
+                aiReports = aiReports,
                 onNudgeProgress = { taskId -> viewModel.nudgeTaskProgress(taskId) }
             )
         }
@@ -236,8 +284,8 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
 
     if (showSubjectDialog) {
         QuickInputDialog(
-            title = "New Subject",
-            firstLabel = "Subject name",
+            title = "New Module",
+            firstLabel = "Module name",
             secondLabel = "Description",
             onDismiss = { showSubjectDialog = false },
             onSubmit = { name, description, _ ->
@@ -249,9 +297,9 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
 
     if (showTaskDialog) {
         QuickInputDialog(
-            title = "New Task",
-            firstLabel = "Task title",
-            secondLabel = "Subject ID (optional)",
+            title = "New Study Action",
+            firstLabel = "Action title",
+            secondLabel = "Module ID (optional)",
             onDismiss = { showTaskDialog = false },
             onSubmit = { title, subjectIdText, _ ->
                 viewModel.addTask(title = title, subjectId = subjectIdText.toLongOrNull())
@@ -265,7 +313,7 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
             title = "New Note",
             firstLabel = "Title",
             secondLabel = "Body",
-            thirdLabel = "Subject ID (optional)",
+            thirdLabel = "Module ID (optional)",
             onDismiss = { showNoteDialog = false },
             onSubmit = { title, body, subjectIdText ->
                 viewModel.addNote(title, body, subjectIdText.toLongOrNull())
@@ -311,7 +359,7 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                 )
                 scope.launch {
                     val message = if (useAiAutoplan) {
-                        "Context uploaded. Agent started autonomous planning."
+                        "Context uploaded. Agent planning started."
                     } else {
                         "Context uploaded in manual mode."
                     }
@@ -325,10 +373,11 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
 }
 
 @Composable
-private fun DashboardHeader(
+private fun DashboardHeroCard(
     todayLabel: String,
-    openTaskCount: Int,
-    upcomingReminderCount: Int
+    focusCount: Int,
+    assessmentCount: Int,
+    openTaskCount: Int
 ) {
     Card(
         shape = MaterialTheme.shapes.large,
@@ -340,7 +389,7 @@ private fun DashboardHeader(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "Study Dashboard",
+                text = "Study Command Center",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold
             )
@@ -349,9 +398,54 @@ private fun DashboardHeader(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                StatBadge(label = "Open tasks", value = openTaskCount)
-                StatBadge(label = "Upcoming", value = upcomingReminderCount)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatBadge(label = "Focus now", value = focusCount)
+                StatBadge(label = "Assessments", value = assessmentCount)
+                StatBadge(label = "Open", value = openTaskCount)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FocusNowCard(
+    items: List<FocusItemUi>,
+    onOpenAll: () -> Unit
+) {
+    Card(
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Focus Now", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                TextButton(onClick = onOpenAll) {
+                    Text("View all")
+                }
+            }
+            if (items.isEmpty()) {
+                Text("No urgent items. Upload unit plans or add modules to let the agent build your day.")
+            } else {
+                items.forEach { item ->
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(item.title, fontWeight = FontWeight.SemiBold)
+                            Text("${item.typeLabel} | ${item.moduleName}", style = MaterialTheme.typography.bodySmall)
+                            Text(item.urgencyLabel, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
             }
         }
     }
@@ -386,14 +480,14 @@ private fun AgentStatusCard(
             ) {
                 Icon(Icons.Filled.AutoAwesome, contentDescription = "Agent")
                 Text(
-                    text = "AI Study Agent",
+                    text = "AI Planner",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold
                 )
                 AssistChip(
                     onClick = {},
                     label = {
-                        Text(if (aiReady) "Connected" else "Rule Mode")
+                        Text(if (aiReady) "Connected" else "Rule mode")
                     }
                 )
             }
@@ -404,7 +498,7 @@ private fun AgentStatusCard(
                 overflow = TextOverflow.Ellipsis
             )
             Button(onClick = onRunCheckIn, enabled = !isAgentWorking) {
-                Text(if (isAgentWorking) "Running Check-In..." else "Run Agent Check-In")
+                Text(if (isAgentWorking) "Building plan..." else "Run Morning Plan")
             }
         }
     }
@@ -428,8 +522,8 @@ private fun QuickActionBar(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            AssistChip(onClick = onAddSubject, label = { Text("+ Subject") })
-            AssistChip(onClick = onAddTask, label = { Text("+ Task") })
+            AssistChip(onClick = onAddSubject, label = { Text("+ Module") })
+            AssistChip(onClick = onAddTask, label = { Text("+ Action") })
             AssistChip(onClick = onAddNote, label = { Text("+ Note") })
             AssistChip(onClick = onAddReminder, label = { Text("+ Reminder") })
         }
@@ -437,8 +531,8 @@ private fun QuickActionBar(
 }
 
 @Composable
-private fun DashboardFeatureCard(
-    card: FeatureCardUi,
+private fun OverviewFeatureCard(
+    card: OverviewCardUi,
     onClick: () -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -460,7 +554,7 @@ private fun DashboardFeatureCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .height(182.dp)
+            .height(186.dp)
             .graphicsLayer(scaleX = scale, scaleY = scale)
             .clickable(
                 interactionSource = interaction,
@@ -525,6 +619,11 @@ private fun DashboardFeatureCard(
 private fun FeatureDetailSheet(
     panel: FeaturePanel,
     state: WorkspaceUiState,
+    subjectNameById: Map<Long, String>,
+    assistantFeed: String,
+    focusItems: List<FocusItemUi>,
+    assessmentTasks: List<TaskEntity>,
+    aiReports: List<NoteEntity>,
     onNudgeProgress: (Long) -> Unit
 ) {
     Column(
@@ -535,12 +634,12 @@ private fun FeatureDetailSheet(
     ) {
         Text(
             text = when (panel) {
-                FeaturePanel.Tasks -> "Tasks"
-                FeaturePanel.Notes -> "Notes"
+                FeaturePanel.Focus -> "Focus Actions"
+                FeaturePanel.Assessments -> "Assessments"
+                FeaturePanel.Modules -> "Modules"
+                FeaturePanel.AiPlan -> "AI Plan"
                 FeaturePanel.Reminders -> "Reminders"
-                FeaturePanel.Subjects -> "Subjects"
-                FeaturePanel.Files -> "Files"
-                FeaturePanel.Progress -> "Progress"
+                FeaturePanel.Library -> "Library"
             },
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold
@@ -549,31 +648,30 @@ private fun FeatureDetailSheet(
         HorizontalDivider()
 
         when (panel) {
-            FeaturePanel.Tasks -> {
-                val tasks = state.tasks
-                    .sortedBy { it.dueAt ?: Long.MAX_VALUE }
-                    .take(40)
-
-                if (tasks.isEmpty()) {
-                    Text("No tasks yet.")
+            FeaturePanel.Focus -> {
+                if (focusItems.isEmpty()) {
+                    Text("No focus actions yet.")
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(tasks, key = { it.id }) { task ->
+                        items(focusItems, key = { it.taskId }) { item ->
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
                                 Column(
                                     modifier = Modifier.padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
-                                    Text(task.title, fontWeight = FontWeight.SemiBold)
-                                    Text("Due ${formatEpochDate(task.dueAt)}", style = MaterialTheme.typography.bodySmall)
-                                    Text("Progress ${task.progressPercent}%", style = MaterialTheme.typography.bodySmall)
+                                    Text(item.title, fontWeight = FontWeight.SemiBold)
+                                    Text("${item.typeLabel} | ${item.moduleName}", style = MaterialTheme.typography.bodySmall)
+                                    Text(item.urgencyLabel, style = MaterialTheme.typography.bodySmall)
+                                    if (item.description.isNotBlank()) {
+                                        Text(item.description, style = MaterialTheme.typography.labelSmall)
+                                    }
                                     LinearProgressIndicator(
-                                        progress = { (task.progressPercent / 100f).coerceIn(0f, 1f) },
+                                        progress = { (item.progressPercent / 100f).coerceIn(0f, 1f) },
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                     AssistChip(
-                                        onClick = { onNudgeProgress(task.id) },
-                                        label = { Text("+15% progress") }
+                                        onClick = { onNudgeProgress(item.taskId) },
+                                        label = { Text("+15% done") }
                                     )
                                 }
                             }
@@ -582,29 +680,96 @@ private fun FeatureDetailSheet(
                 }
             }
 
-            FeaturePanel.Notes -> {
-                val notes = state.notes.sortedByDescending { it.updatedAt }.take(40)
-                if (notes.isEmpty()) {
-                    Text("No notes yet.")
+            FeaturePanel.Assessments -> {
+                if (assessmentTasks.isEmpty()) {
+                    Text("No quiz/test tasks detected yet.")
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(notes, key = { it.id }) { note ->
+                        items(assessmentTasks, key = { it.id }) { task ->
+                            val moduleName = task.subjectId?.let { subjectNameById[it] } ?: "Unassigned"
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
                                 Column(
                                     modifier = Modifier.padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    Text(note.title, fontWeight = FontWeight.SemiBold)
+                                    Text(task.title, fontWeight = FontWeight.SemiBold)
+                                    Text(moduleName, style = MaterialTheme.typography.bodySmall)
+                                    Text(relativeDueLabel(task.dueAt), style = MaterialTheme.typography.bodySmall)
+                                    Text("Progress ${task.progressPercent}%", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FeaturePanel.Modules -> {
+                val openTasksBySubject = state.tasks.filter { !it.isCompleted }.groupBy { it.subjectId }
+                val assessmentBySubject = assessmentTasks.groupBy { it.subjectId }
+
+                if (state.subjects.isEmpty()) {
+                    Text("No modules yet.")
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(state.subjects, key = { it.id }) { subject ->
+                            val moduleTasks = openTasksBySubject[subject.id].orEmpty()
+                            val moduleAssessments = assessmentBySubject[subject.id].orEmpty()
+                            val moduleAvg = if (moduleTasks.isEmpty()) 0 else moduleTasks.map { it.progressPercent }.average().toInt()
+
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(subject.name, fontWeight = FontWeight.SemiBold)
+                                    Text(subject.description.ifBlank { "No description" }, style = MaterialTheme.typography.bodySmall)
                                     Text(
-                                        note.content,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 4,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "Updated ${formatEpochDateTime(note.updatedAt)}",
+                                        "Open actions ${moduleTasks.size} | Assessments ${moduleAssessments.size}",
                                         style = MaterialTheme.typography.labelSmall
                                     )
+                                    LinearProgressIndicator(
+                                        progress = { (moduleAvg / 100f).coerceIn(0f, 1f) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Text("Module completion $moduleAvg%", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FeaturePanel.AiPlan -> {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text("Latest agent message", fontWeight = FontWeight.SemiBold)
+                            Text(assistantFeed, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+
+                    if (aiReports.isEmpty()) {
+                        Text("No AI reports yet.")
+                    } else {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            items(aiReports.take(20), key = { it.id }) { report ->
+                                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(report.title, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            report.content,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 6,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text("Updated ${formatEpochDateTime(report.updatedAt)}", style = MaterialTheme.typography.labelSmall)
+                                    }
                                 }
                             }
                         }
@@ -613,23 +778,22 @@ private fun FeatureDetailSheet(
             }
 
             FeaturePanel.Reminders -> {
-                val reminders = state.reminders.sortedBy { it.triggerAt }.take(40)
+                val reminders = state.reminders.sortedBy { it.triggerAt }
                 if (reminders.isEmpty()) {
                     Text("No reminders set yet.")
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(reminders, key = { it.id }) { reminder ->
+                            val moduleName = reminder.subjectId?.let { subjectNameById[it] } ?: "General"
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
                                 Column(
                                     modifier = Modifier.padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     Text(reminder.title, fontWeight = FontWeight.SemiBold)
+                                    Text(moduleName, style = MaterialTheme.typography.bodySmall)
                                     Text(reminder.message, style = MaterialTheme.typography.bodySmall)
-                                    Text(
-                                        text = formatEpochDateTime(reminder.triggerAt),
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
+                                    Text(formatEpochDateTime(reminder.triggerAt), style = MaterialTheme.typography.labelSmall)
                                 }
                             }
                         }
@@ -637,80 +801,24 @@ private fun FeatureDetailSheet(
                 }
             }
 
-            FeaturePanel.Subjects -> {
-                val taskCountBySubject = state.tasks.groupBy { it.subjectId }
-                val subjects = state.subjects.sortedBy { it.name }
-                if (subjects.isEmpty()) {
-                    Text("No subjects yet.")
-                } else {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(subjects, key = { it.id }) { subject ->
-                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(subject.name, fontWeight = FontWeight.SemiBold)
-                                    Text(
-                                        text = subject.description.ifBlank { "No description" },
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                    Text(
-                                        text = "Tasks: ${taskCountBySubject[subject.id]?.size ?: 0}",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            FeaturePanel.Files -> {
-                val files = state.files.sortedByDescending { it.uploadedAt }.take(40)
+            FeaturePanel.Library -> {
+                val files = state.files.sortedByDescending { it.uploadedAt }
                 if (files.isEmpty()) {
                     Text("No uploaded files yet.")
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(files, key = { it.id }) { file ->
+                            val moduleName = file.subjectId?.let { subjectNameById[it] } ?: "General"
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
                                 Column(
                                     modifier = Modifier.padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     Text(file.name, fontWeight = FontWeight.SemiBold)
+                                    Text(moduleName, style = MaterialTheme.typography.bodySmall)
                                     Text(file.mimeType, style = MaterialTheme.typography.bodySmall)
-                                    Text(
-                                        text = "Uploaded ${formatEpochDateTime(file.uploadedAt)}",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
+                                    Text("Uploaded ${formatEpochDateTime(file.uploadedAt)}", style = MaterialTheme.typography.labelSmall)
                                 }
-                            }
-                        }
-                    }
-                }
-            }
-
-            FeaturePanel.Progress -> {
-                val avg = state.averageProgress
-                val logs = state.progressLogs.sortedByDescending { it.loggedAt }.take(30)
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Completed ${state.completedTaskCount} / ${state.tasks.size} tasks")
-                    LinearProgressIndicator(
-                        progress = { (avg / 100f).coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Text("Average progress: $avg%", style = MaterialTheme.typography.bodySmall)
-                    HorizontalDivider()
-                    if (logs.isEmpty()) {
-                        Text("No progress logs yet.")
-                    } else {
-                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(logs, key = { it.id }) { log ->
-                                Text(
-                                    text = "${log.progressPercent}% - ${log.note.ifBlank { "Update" }}",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
                             }
                         }
                     }
@@ -788,7 +896,7 @@ private fun ReminderDialog(
                 OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Title") })
                 OutlinedTextField(value = message, onValueChange = { message = it }, label = { Text("Message") })
                 OutlinedTextField(value = minutes, onValueChange = { minutes = it }, label = { Text("In minutes") })
-                OutlinedTextField(value = subjectId, onValueChange = { subjectId = it }, label = { Text("Subject ID (optional)") })
+                OutlinedTextField(value = subjectId, onValueChange = { subjectId = it }, label = { Text("Module ID (optional)") })
                 OutlinedTextField(value = taskId, onValueChange = { taskId = it }, label = { Text("Task ID (optional)") })
             }
         },
@@ -819,7 +927,9 @@ private fun UploadContextDialog(
     onSubmit: (Long?, Long?, String, Boolean) -> Unit
 ) {
     var intentText by remember {
-        mutableStateOf("Analyze this study material and autonomously improve my plan.")
+        mutableStateOf(
+            "Read this unit plan and build a clear module-based study plan with upcoming tests, quizzes, reminders, and no duplicate actions."
+        )
     }
     var subjectId by remember { mutableStateOf("") }
     var taskId by remember { mutableStateOf("") }
@@ -842,7 +952,7 @@ private fun UploadContextDialog(
                 OutlinedTextField(
                     value = subjectId,
                     onValueChange = { subjectId = it },
-                    label = { Text("Subject ID (optional)") }
+                    label = { Text("Module ID (optional)") }
                 )
                 OutlinedTextField(
                     value = taskId,
@@ -907,91 +1017,166 @@ private fun resolveUploadDraft(context: Context, uri: Uri): UploadDraft {
     )
 }
 
-private fun buildFeatureCards(state: WorkspaceUiState): List<FeatureCardUi> {
-    val tasksPreview = state.tasks
-        .filter { !it.isCompleted }
-        .sortedBy { it.dueAt ?: Long.MAX_VALUE }
+private fun buildOverviewCards(
+    state: WorkspaceUiState,
+    subjectNameById: Map<Long, String>,
+    assistantFeed: String,
+    focusItems: List<FocusItemUi>,
+    assessmentTasks: List<TaskEntity>,
+    aiReports: List<NoteEntity>
+): List<OverviewCardUi> {
+    val modulePreview = state.subjects
+        .sortedBy { it.name }
         .take(2)
-        .map { "${it.title} • ${formatEpochDate(it.dueAt)}" }
-        .ifEmpty { listOf("No open tasks") }
-
-    val notesPreview = state.notes
-        .sortedByDescending { it.updatedAt }
-        .take(2)
-        .map { note ->
-            if (note.content.isBlank()) note.title else "${note.title}: ${note.content.take(48)}"
+        .map { subject ->
+            val openCount = state.tasks.count { it.subjectId == subject.id && !it.isCompleted }
+            "${subject.name}: $openCount open"
         }
-        .ifEmpty { listOf("No notes yet") }
+        .ifEmpty { listOf("No modules configured") }
 
-    val remindersPreview = state.upcomingReminders
+    val assessmentPreview = assessmentTasks
         .take(2)
-        .map { "${it.title} • ${formatEpochDateTime(it.triggerAt)}" }
+        .map { task ->
+            val moduleName = task.subjectId?.let { subjectNameById[it] } ?: "General"
+            "${task.title} | $moduleName | ${relativeDueLabel(task.dueAt)}"
+        }
+        .ifEmpty { listOf("No quiz or test tasks detected") }
+
+    val reminderPreview = state.upcomingReminders
+        .take(2)
+        .map { "${it.title} | ${formatEpochDateTime(it.triggerAt)}" }
         .ifEmpty { listOf("No upcoming reminders") }
 
-    val subjectsPreview = state.subjects
-        .take(2)
-        .map { it.name }
-        .ifEmpty { listOf("No subjects yet") }
-
-    val filesPreview = state.files
+    val libraryPreview = state.files
         .sortedByDescending { it.uploadedAt }
         .take(2)
         .map { it.name }
-        .ifEmpty { listOf("No files uploaded") }
+        .ifEmpty { listOf("No uploaded unit docs") }
 
-    val progressPreview = listOf(
-        "Average progress ${state.averageProgress}%",
-        "Completed ${state.completedTaskCount}/${state.tasks.size} tasks"
-    )
+    val planPreview = buildList {
+        add(assistantFeed.lines().firstOrNull().orEmpty().ifBlank { "Agent has no report yet" })
+        add(aiReports.firstOrNull()?.title ?: "Run morning plan to generate summary")
+    }
+
+    val focusPreview = focusItems
+        .take(2)
+        .map { "${it.title} | ${it.urgencyLabel}" }
+        .ifEmpty { listOf("No urgent actions") }
 
     return listOf(
-        FeatureCardUi(
-            panel = FeaturePanel.Tasks,
-            title = "Tasks",
+        OverviewCardUi(
+            panel = FeaturePanel.Focus,
+            title = "Study Actions",
             icon = Icons.Filled.AssignmentTurnedIn,
             accent = Color(0xFF2D9B63),
-            stat = state.openTaskCount.toString(),
-            preview = tasksPreview
+            stat = focusItems.size.toString(),
+            preview = focusPreview
         ),
-        FeatureCardUi(
-            panel = FeaturePanel.Notes,
-            title = "Notes",
-            icon = Icons.Filled.Article,
+        OverviewCardUi(
+            panel = FeaturePanel.Assessments,
+            title = "Tests and Quizzes",
+            icon = Icons.Filled.ShowChart,
             accent = Color(0xFF2F80ED),
-            stat = state.notes.size.toString(),
-            preview = notesPreview
+            stat = assessmentTasks.size.toString(),
+            preview = assessmentPreview
         ),
-        FeatureCardUi(
+        OverviewCardUi(
+            panel = FeaturePanel.Modules,
+            title = "Modules",
+            icon = Icons.Filled.School,
+            accent = Color(0xFF5C6F82),
+            stat = state.subjects.size.toString(),
+            preview = modulePreview
+        ),
+        OverviewCardUi(
+            panel = FeaturePanel.AiPlan,
+            title = "AI Plan",
+            icon = Icons.Filled.AutoAwesome,
+            accent = Color(0xFF967C2F),
+            stat = aiReports.size.toString(),
+            preview = planPreview
+        ),
+        OverviewCardUi(
             panel = FeaturePanel.Reminders,
             title = "Reminders",
             icon = Icons.Filled.Alarm,
             accent = Color(0xFFF2994A),
             stat = state.upcomingReminders.size.toString(),
-            preview = remindersPreview
+            preview = reminderPreview
         ),
-        FeatureCardUi(
-            panel = FeaturePanel.Subjects,
-            title = "Subjects",
-            icon = Icons.Filled.School,
-            accent = Color(0xFF5C6F82),
-            stat = state.subjects.size.toString(),
-            preview = subjectsPreview
-        ),
-        FeatureCardUi(
-            panel = FeaturePanel.Files,
-            title = "Files",
+        OverviewCardUi(
+            panel = FeaturePanel.Library,
+            title = "Unit Library",
             icon = Icons.Filled.Folder,
             accent = Color(0xFF1F9E96),
             stat = state.files.size.toString(),
-            preview = filesPreview
-        ),
-        FeatureCardUi(
-            panel = FeaturePanel.Progress,
-            title = "Progress",
-            icon = Icons.Filled.ShowChart,
-            accent = Color(0xFFE06464),
-            stat = "${state.averageProgress}%",
-            preview = progressPreview
+            preview = libraryPreview
         )
     )
+}
+
+private fun buildFocusItems(
+    tasks: List<TaskEntity>,
+    subjectNameById: Map<Long, String>
+): List<FocusItemUi> {
+    val now = System.currentTimeMillis()
+
+    return tasks
+        .filter { !it.isCompleted }
+        .map { task ->
+            val moduleName = task.subjectId?.let { subjectNameById[it] } ?: "General"
+            val type = classifyTaskType(task)
+            val urgency = relativeDueLabel(task.dueAt)
+            FocusItemUi(
+                taskId = task.id,
+                title = task.title,
+                moduleName = moduleName,
+                typeLabel = type,
+                urgencyLabel = urgency,
+                progressPercent = task.progressPercent,
+                dueAt = task.dueAt,
+                description = task.description
+            )
+        }
+        .sortedWith(
+            compareBy<FocusItemUi> {
+                // Assessment items should bubble up first.
+                if (it.typeLabel.contains("assessment", ignoreCase = true)) 0 else 1
+            }.thenBy {
+                it.dueAt ?: Long.MAX_VALUE
+            }.thenBy {
+                it.progressPercent
+            }
+        )
+        .filter { item ->
+            val due = item.dueAt
+            due == null || due <= now + 14L * 24L * 60L * 60L * 1000L || item.progressPercent < 50
+        }
+}
+
+private fun classifyTaskType(task: TaskEntity): String {
+    val text = "${task.title} ${task.description}".lowercase()
+    return when {
+        text.contains("quiz") || text.contains("test") || text.contains("exam") || text.contains("assessment") -> "Assessment"
+        text.contains("assignment") || text.contains("submission") -> "Assignment"
+        text.contains("revision") || text.contains("review") -> "Revision"
+        text.contains("project") || text.contains("lab") -> "Project"
+        text.contains("plan") || text.contains("schedule") -> "Planning"
+        else -> "Study action"
+    }
+}
+
+private fun relativeDueLabel(dueAt: Long?): String {
+    if (dueAt == null) return "No due date"
+    val today = LocalDate.now()
+    val dueDate = Instant.ofEpochMilli(dueAt).atZone(ZoneId.systemDefault()).toLocalDate()
+    val dayDelta = dueDate.toEpochDay() - today.toEpochDay()
+
+    return when {
+        dayDelta < 0 -> "Overdue by ${dayDelta.absoluteValue} day(s)"
+        dayDelta == 0L -> "Due today"
+        dayDelta == 1L -> "Due tomorrow"
+        dayDelta <= 7L -> "Due in $dayDelta day(s)"
+        else -> "Due ${formatEpochDate(dueAt)}"
+    }
 }
