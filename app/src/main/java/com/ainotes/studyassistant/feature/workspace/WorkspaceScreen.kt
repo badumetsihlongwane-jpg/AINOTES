@@ -6,8 +6,13 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,39 +21,47 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.graphicsLayer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Alarm
-import androidx.compose.material.icons.filled.Assignment
+import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.AssignmentTurnedIn
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.EditNote
-import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,14 +71,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ainotes.studyassistant.core.util.formatEpochDate
 import com.ainotes.studyassistant.core.util.formatEpochDateTime
-import com.ainotes.studyassistant.data.local.entity.TaskEntity
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 data class UploadDraft(
     val name: String,
@@ -74,52 +91,47 @@ data class UploadDraft(
     val sizeBytes: Long?
 )
 
-private enum class TaskSortLens {
-    Soon,
-    Module,
-    Momentum
+private enum class FeaturePanel {
+    Tasks,
+    Notes,
+    Reminders,
+    Subjects,
+    Files,
+    Progress
 }
 
+private data class FeatureCardUi(
+    val panel: FeaturePanel,
+    val title: String,
+    val icon: ImageVector,
+    val accent: Color,
+    val stat: String,
+    val preview: List<String>
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
     val state = viewModel.uiState.collectAsStateWithLifecycle().value
     val assistantFeed = viewModel.assistantFeed.collectAsStateWithLifecycle().value
     val aiReady = viewModel.isAiReady
+    val isAgentWorking = viewModel.isAgentWorking.collectAsStateWithLifecycle().value
+
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    var quickMenuExpanded by remember { mutableStateOf(false) }
+    var selectedPanel by remember { mutableStateOf<FeaturePanel?>(null) }
+
     var showSubjectDialog by remember { mutableStateOf(false) }
     var showTaskDialog by remember { mutableStateOf(false) }
     var showNoteDialog by remember { mutableStateOf(false) }
     var showReminderDialog by remember { mutableStateOf(false) }
+
     var pendingUpload by remember { mutableStateOf<UploadDraft?>(null) }
     var showUploadDialog by remember { mutableStateOf(false) }
-    var sortLens by remember { mutableStateOf(TaskSortLens.Soon) }
 
-    val spotlightTasks = remember(state.tasks, state.subjects, sortLens) {
-        when (sortLens) {
-            TaskSortLens.Soon -> state.tasks
-                .filter { !it.isCompleted }
-                .sortedBy { it.dueAt ?: Long.MAX_VALUE }
-                .take(5)
-
-            TaskSortLens.Module -> {
-                val subjectNames = state.subjects.associateBy({ it.id }, { it.name })
-                state.tasks
-                    .filter { !it.isCompleted }
-                    .sortedWith(
-                        compareBy<TaskEntity> { subjectNames[it.subjectId].orEmpty() }
-                            .thenBy { it.dueAt ?: Long.MAX_VALUE }
-                    )
-                    .take(5)
-            }
-
-            TaskSortLens.Momentum -> state.tasks
-                .filter { !it.isCompleted }
-                .sortedByDescending { it.progressPercent }
-                .take(5)
-        }
+    LaunchedEffect(Unit) {
+        viewModel.onDashboardOpened()
     }
 
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -133,62 +145,28 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
         } catch (_: SecurityException) {
-            // Some providers may not grant persistable permission.
+            // Provider may not support persistable URI access.
         }
         pendingUpload = resolveUploadDraft(context, uri)
         showUploadDialog = true
+    }
+
+    val cards = buildFeatureCards(state)
+    val todayLabel = remember {
+        LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE, dd MMM"))
     }
 
     Scaffold(
         containerColor = Color.Transparent,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                AnimatedVisibility(visible = quickMenuExpanded) {
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        MiniActionFab(label = "Subject", icon = Icons.Filled.School) {
-                            showSubjectDialog = true
-                            quickMenuExpanded = false
-                        }
-                        MiniActionFab(label = "Task", icon = Icons.Filled.Assignment) {
-                            showTaskDialog = true
-                            quickMenuExpanded = false
-                        }
-                        MiniActionFab(label = "Note", icon = Icons.Filled.EditNote) {
-                            showNoteDialog = true
-                            quickMenuExpanded = false
-                        }
-                        MiniActionFab(label = "Reminder", icon = Icons.Filled.Alarm) {
-                            showReminderDialog = true
-                            quickMenuExpanded = false
-                        }
-                    }
-                }
-
-                ExtendedFloatingActionButton(
-                    onClick = {
-                        filePicker.launch(arrayOf("*/*"))
-                    },
-                    icon = { Icon(Icons.Filled.CloudUpload, contentDescription = "Upload context") },
-                    text = { Text("Upload Context") },
-                    containerColor = Color(0xFF3E6E4A),
-                    contentColor = Color.White
-                )
-
-                SmallFloatingActionButton(
-                    onClick = { quickMenuExpanded = !quickMenuExpanded },
-                    containerColor = Color(0xFFFFF3E3),
-                    contentColor = Color(0xFF3E6E4A)
-                ) {
-                    Icon(Icons.Filled.Menu, contentDescription = "Quick create")
-                }
-            }
+            ExtendedFloatingActionButton(
+                onClick = { filePicker.launch(arrayOf("*/*")) },
+                icon = { Icon(Icons.Filled.CloudUpload, contentDescription = "Upload context") },
+                text = { Text("Upload Context") },
+                containerColor = Color(0xFF255C43),
+                contentColor = Color.White
+            )
         }
     ) { innerPadding ->
         Box(
@@ -197,130 +175,62 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                 .background(
                     brush = Brush.verticalGradient(
                         listOf(
-                            Color(0xFFF8F3E8),
-                            Color(0xFFECEDE6)
+                            MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
                         )
                     )
                 )
                 .padding(innerPadding)
         ) {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 170.dp),
+                columns = GridCells.Fixed(2),
                 contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    WorkspaceHeroCard(state = state, sortLens = sortLens, onSortLensChange = { sortLens = it })
-                }
-
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    ContextGatewayCard(
-                        latestFileName = state.files.firstOrNull()?.name,
-                        aiReady = aiReady
+                item(span = { GridItemSpan(2) }) {
+                    DashboardHeader(
+                        todayLabel = todayLabel,
+                        openTaskCount = state.openTaskCount,
+                        upcomingReminderCount = state.upcomingReminders.size
                     )
                 }
 
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    AssistantPulseCard(message = assistantFeed)
+                item(span = { GridItemSpan(2) }) {
+                    AgentStatusCard(
+                        aiReady = aiReady,
+                        isAgentWorking = isAgentWorking,
+                        message = assistantFeed,
+                        onRunCheckIn = { viewModel.runAgentCheckIn(force = true) }
+                    )
                 }
 
-                item {
-                    CollageCard(title = "Focus Queue") {
-                        if (spotlightTasks.isEmpty()) {
-                            Text("No upcoming deadlines", style = MaterialTheme.typography.bodySmall)
-                        } else {
-                            spotlightTasks.take(3).forEach { task ->
-                                Text(task.title, fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    "Due ${formatEpochDate(task.dueAt)}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFF4E4A44)
-                                )
-                                AssistChip(
-                                    onClick = { viewModel.nudgeTaskProgress(task.id) },
-                                    label = { Text("+15%") }
-                                )
-                                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
-                            }
-                        }
-                    }
+                item(span = { GridItemSpan(2) }) {
+                    QuickActionBar(
+                        onAddSubject = { showSubjectDialog = true },
+                        onAddTask = { showTaskDialog = true },
+                        onAddNote = { showNoteDialog = true },
+                        onAddReminder = { showReminderDialog = true }
+                    )
                 }
 
-                item {
-                    CollageCard(title = "Subjects") {
-                        if (state.subjects.isEmpty()) {
-                            Text("Create your first subject from quick actions.", style = MaterialTheme.typography.bodySmall)
-                        } else {
-                            state.subjects.take(6).forEach { subject ->
-                                Text(
-                                    text = subject.name,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
-                }
-
-                item {
-                    CollageCard(title = "Notes") {
-                        if (state.notes.isEmpty()) {
-                            Text("No notes yet", style = MaterialTheme.typography.bodySmall)
-                        } else {
-                            state.notes.take(3).forEach { note ->
-                                Text(note.title, fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    note.content,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
-                            }
-                        }
-                    }
-                }
-
-                item {
-                    CollageCard(title = "Reminders") {
-                        if (state.upcomingReminders.isEmpty()) {
-                            Text("No reminders queued", style = MaterialTheme.typography.bodySmall)
-                        } else {
-                            state.upcomingReminders.take(3).forEach { reminder ->
-                                Text(reminder.title, fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    formatEpochDateTime(reminder.triggerAt),
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
-                            }
-                        }
-                    }
-                }
-
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    CollageCard(title = "Progress") {
-                        Text(
-                            "${state.completedTaskCount} completed of ${state.tasks.size} tasks",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        LinearProgressIndicator(
-                            progress = { (state.averageProgress / 100f).coerceIn(0f, 1f) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(10.dp)
-                                .padding(top = 6.dp)
-                        )
-                        Text(
-                            "Average progress ${state.averageProgress}%",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(top = 6.dp)
-                        )
-                    }
+                items(cards, key = { it.title }) { card ->
+                    DashboardFeatureCard(
+                        card = card,
+                        onClick = { selectedPanel = card.panel }
+                    )
                 }
             }
+        }
+    }
+
+    selectedPanel?.let { panel ->
+        ModalBottomSheet(onDismissRequest = { selectedPanel = null }) {
+            FeatureDetailSheet(
+                panel = panel,
+                state = state,
+                onNudgeProgress = { taskId -> viewModel.nudgeTaskProgress(taskId) }
+            )
         }
     }
 
@@ -400,12 +310,12 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
                     useAiAutoplan = useAiAutoplan
                 )
                 scope.launch {
-                    val notice = if (useAiAutoplan) {
-                        "Context uploaded. AI autopilot started."
+                    val message = if (useAiAutoplan) {
+                        "Context uploaded. Agent started autonomous planning."
                     } else {
                         "Context uploaded in manual mode."
                     }
-                    snackbarHostState.showSnackbar(notice)
+                    snackbarHostState.showSnackbar(message)
                 }
                 showUploadDialog = false
                 pendingUpload = null
@@ -415,159 +325,410 @@ fun WorkspaceScreen(viewModel: WorkspaceViewModel) {
 }
 
 @Composable
-private fun WorkspaceHeroCard(
-    state: WorkspaceUiState,
-    sortLens: TaskSortLens,
-    onSortLensChange: (TaskSortLens) -> Unit
+private fun DashboardHeader(
+    todayLabel: String,
+    openTaskCount: Int,
+    upcomingReminderCount: Int
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = Color(0xE6FFFFFF))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text("Study Workspace", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text(
-                "Everything lives here: subjects, tasks, notes, files, reminders, and progress.",
+                text = "Study Dashboard",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = todayLabel,
                 style = MaterialTheme.typography.bodyMedium,
-                color = Color(0xFF4A4741)
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatTag(label = "Subjects", value = state.subjects.size)
-                StatTag(label = "Open", value = state.openTaskCount)
-                StatTag(label = "Files", value = state.files.size)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AssistChip(
-                    onClick = { onSortLensChange(TaskSortLens.Soon) },
-                    label = { Text("Soon") },
-                    enabled = sortLens != TaskSortLens.Soon
-                )
-                AssistChip(
-                    onClick = { onSortLensChange(TaskSortLens.Module) },
-                    label = { Text("Module") },
-                    enabled = sortLens != TaskSortLens.Module
-                )
-                AssistChip(
-                    onClick = { onSortLensChange(TaskSortLens.Momentum) },
-                    label = { Text("Momentum") },
-                    enabled = sortLens != TaskSortLens.Momentum
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StatBadge(label = "Open tasks", value = openTaskCount)
+                StatBadge(label = "Upcoming", value = upcomingReminderCount)
             }
         }
     }
 }
 
 @Composable
-private fun ContextGatewayCard(latestFileName: String?, aiReady: Boolean) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2B24), contentColor = Color(0xFFF8F5EE))
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text("Context Gateway", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text(
-                "Upload any study material. The app stores metadata and intent notes so future AI actions can understand your learning context.",
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Text(
-                text = "Latest upload: ${latestFileName ?: "None yet"}",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFFCBD3CC)
-            )
-            Text(
-                text = if (aiReady) "Autopilot mode: READY" else "Autopilot mode: NOT CONFIGURED",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (aiReady) Color(0xFF9BEAAE) else Color(0xFFFFC9A7)
-            )
-        }
-    }
-}
-
-@Composable
-private fun AssistantPulseCard(message: String) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F0E6), contentColor = Color(0xFF2B2A26))
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text("Assistant Pulse", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(
-                "AI acts like a co-student: organizes content, tracks progress, and reports actions here.",
-                style = MaterialTheme.typography.bodySmall
-            )
-            Text(message, style = MaterialTheme.typography.bodyMedium)
-        }
-    }
-}
-
-@Composable
-private fun CollageCard(
-    title: String,
-    content: @Composable ColumnScope.() -> Unit
+private fun AgentStatusCard(
+    aiReady: Boolean,
+    isAgentWorking: Boolean,
+    message: String,
+    onRunCheckIn: () -> Unit
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xD9FFFFFF)),
-        shape = MaterialTheme.shapes.large
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = if (aiReady) {
+                Color(0xFF1F2F27)
+            } else {
+                MaterialTheme.colorScheme.surface
+            },
+            contentColor = if (aiReady) Color(0xFFF3F8F4) else MaterialTheme.colorScheme.onSurface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            content = {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                content()
-            }
-        )
-    }
-}
-
-@Composable
-private fun StatTag(label: String, value: Int) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEFD7)),
-        modifier = Modifier.width(92.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text(value.toString(), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(label, style = MaterialTheme.typography.labelSmall)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Filled.AutoAwesome, contentDescription = "Agent")
+                Text(
+                    text = "AI Study Agent",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                AssistChip(
+                    onClick = {},
+                    label = {
+                        Text(if (aiReady) "Connected" else "Rule Mode")
+                    }
+                )
+            }
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 5,
+                overflow = TextOverflow.Ellipsis
+            )
+            Button(onClick = onRunCheckIn, enabled = !isAgentWorking) {
+                Text(if (isAgentWorking) "Running Check-In..." else "Run Agent Check-In")
+            }
         }
     }
 }
 
 @Composable
-private fun MiniActionFab(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+private fun QuickActionBar(
+    onAddSubject: () -> Unit,
+    onAddTask: () -> Unit,
+    onAddNote: () -> Unit,
+    onAddReminder: () -> Unit
+) {
+    Card(
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            AssistChip(onClick = onAddSubject, label = { Text("+ Subject") })
+            AssistChip(onClick = onAddTask, label = { Text("+ Task") })
+            AssistChip(onClick = onAddNote, label = { Text("+ Note") })
+            AssistChip(onClick = onAddReminder, label = { Text("+ Reminder") })
+        }
+    }
+}
+
+@Composable
+private fun DashboardFeatureCard(
+    card: FeatureCardUi,
     onClick: () -> Unit
 ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 320f),
+        label = "card_scale"
+    )
+    val containerColor by animateColorAsState(
+        targetValue = if (pressed) {
+            card.accent.copy(alpha = 0.28f)
+        } else {
+            card.accent.copy(alpha = 0.16f)
+        },
+        label = "card_color"
+    )
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(182.dp)
+            .graphicsLayer(scaleX = scale, scaleY = scale)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick
+            ),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
     ) {
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xEFFFFFFF))) {
-            Text(label, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
-        }
-        SmallFloatingActionButton(
-            onClick = onClick,
-            containerColor = Color(0xFFE9EFEA),
-            contentColor = Color(0xFF2F5E3D)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(icon, contentDescription = label)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = card.icon,
+                        contentDescription = card.title,
+                        tint = card.accent
+                    )
+                    Text(
+                        text = card.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Card(colors = CardDefaults.cardColors(containerColor = card.accent.copy(alpha = 0.18f))) {
+                    Text(
+                        text = card.stat,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = card.accent,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            card.preview.forEach { line ->
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.86f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeatureDetailSheet(
+    panel: FeaturePanel,
+    state: WorkspaceUiState,
+    onNudgeProgress: (Long) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = when (panel) {
+                FeaturePanel.Tasks -> "Tasks"
+                FeaturePanel.Notes -> "Notes"
+                FeaturePanel.Reminders -> "Reminders"
+                FeaturePanel.Subjects -> "Subjects"
+                FeaturePanel.Files -> "Files"
+                FeaturePanel.Progress -> "Progress"
+            },
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold
+        )
+
+        HorizontalDivider()
+
+        when (panel) {
+            FeaturePanel.Tasks -> {
+                val tasks = state.tasks
+                    .sortedBy { it.dueAt ?: Long.MAX_VALUE }
+                    .take(40)
+
+                if (tasks.isEmpty()) {
+                    Text("No tasks yet.")
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(tasks, key = { it.id }) { task ->
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Text(task.title, fontWeight = FontWeight.SemiBold)
+                                    Text("Due ${formatEpochDate(task.dueAt)}", style = MaterialTheme.typography.bodySmall)
+                                    Text("Progress ${task.progressPercent}%", style = MaterialTheme.typography.bodySmall)
+                                    LinearProgressIndicator(
+                                        progress = { (task.progressPercent / 100f).coerceIn(0f, 1f) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    AssistChip(
+                                        onClick = { onNudgeProgress(task.id) },
+                                        label = { Text("+15% progress") }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FeaturePanel.Notes -> {
+                val notes = state.notes.sortedByDescending { it.updatedAt }.take(40)
+                if (notes.isEmpty()) {
+                    Text("No notes yet.")
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(notes, key = { it.id }) { note ->
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(note.title, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        note.content,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 4,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "Updated ${formatEpochDateTime(note.updatedAt)}",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FeaturePanel.Reminders -> {
+                val reminders = state.reminders.sortedBy { it.triggerAt }.take(40)
+                if (reminders.isEmpty()) {
+                    Text("No reminders set yet.")
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(reminders, key = { it.id }) { reminder ->
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(reminder.title, fontWeight = FontWeight.SemiBold)
+                                    Text(reminder.message, style = MaterialTheme.typography.bodySmall)
+                                    Text(
+                                        text = formatEpochDateTime(reminder.triggerAt),
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FeaturePanel.Subjects -> {
+                val taskCountBySubject = state.tasks.groupBy { it.subjectId }
+                val subjects = state.subjects.sortedBy { it.name }
+                if (subjects.isEmpty()) {
+                    Text("No subjects yet.")
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(subjects, key = { it.id }) { subject ->
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(subject.name, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = subject.description.ifBlank { "No description" },
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        text = "Tasks: ${taskCountBySubject[subject.id]?.size ?: 0}",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FeaturePanel.Files -> {
+                val files = state.files.sortedByDescending { it.uploadedAt }.take(40)
+                if (files.isEmpty()) {
+                    Text("No uploaded files yet.")
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(files, key = { it.id }) { file ->
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(file.name, fontWeight = FontWeight.SemiBold)
+                                    Text(file.mimeType, style = MaterialTheme.typography.bodySmall)
+                                    Text(
+                                        text = "Uploaded ${formatEpochDateTime(file.uploadedAt)}",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FeaturePanel.Progress -> {
+                val avg = state.averageProgress
+                val logs = state.progressLogs.sortedByDescending { it.loggedAt }.take(30)
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Completed ${state.completedTaskCount} / ${state.tasks.size} tasks")
+                    LinearProgressIndicator(
+                        progress = { (avg / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text("Average progress: $avg%", style = MaterialTheme.typography.bodySmall)
+                    HorizontalDivider()
+                    if (logs.isEmpty()) {
+                        Text("No progress logs yet.")
+                    } else {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(logs, key = { it.id }) { log ->
+                                Text(
+                                    text = "${log.progressPercent}% - ${log.note.ifBlank { "Update" }}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatBadge(label: String, value: Int) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f))) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(value.toString(), fontWeight = FontWeight.Bold)
+            Text(label, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
@@ -599,8 +760,7 @@ private fun QuickInputDialog(
         },
         confirmButton = {
             TextButton(onClick = { onSubmit(first, second, third) }, enabled = first.isNotBlank()) {
-                Icon(Icons.Filled.Add, contentDescription = null)
-                Text(" Save")
+                Text("Save")
             }
         },
         dismissButton = {
@@ -659,7 +819,7 @@ private fun UploadContextDialog(
     onSubmit: (Long?, Long?, String, Boolean) -> Unit
 ) {
     var intentText by remember {
-        mutableStateOf("Use this file to support my study tasks and generate better plans later.")
+        mutableStateOf("Analyze this study material and autonomously improve my plan.")
     }
     var subjectId by remember { mutableStateOf("") }
     var taskId by remember { mutableStateOf("") }
@@ -676,7 +836,7 @@ private fun UploadContextDialog(
                 OutlinedTextField(
                     value = intentText,
                     onValueChange = { intentText = it },
-                    label = { Text("Learning intent") },
+                    label = { Text("Agent directive") },
                     minLines = 3
                 )
                 OutlinedTextField(
@@ -694,7 +854,7 @@ private fun UploadContextDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Let AI auto-organize this upload")
+                    Text("Enable autonomous AI planning")
                     Switch(
                         checked = autopilotEnabled,
                         onCheckedChange = { autopilotEnabled = it }
@@ -713,7 +873,7 @@ private fun UploadContextDialog(
                     )
                 }
             ) {
-                Text("Save Context")
+                Text("Save")
             }
         },
         dismissButton = {
@@ -744,5 +904,94 @@ private fun resolveUploadDraft(context: Context, uri: Uri): UploadDraft {
         uri = uri.toString(),
         mimeType = context.contentResolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" },
         sizeBytes = sizeBytes
+    )
+}
+
+private fun buildFeatureCards(state: WorkspaceUiState): List<FeatureCardUi> {
+    val tasksPreview = state.tasks
+        .filter { !it.isCompleted }
+        .sortedBy { it.dueAt ?: Long.MAX_VALUE }
+        .take(2)
+        .map { "${it.title} • ${formatEpochDate(it.dueAt)}" }
+        .ifEmpty { listOf("No open tasks") }
+
+    val notesPreview = state.notes
+        .sortedByDescending { it.updatedAt }
+        .take(2)
+        .map { note ->
+            if (note.content.isBlank()) note.title else "${note.title}: ${note.content.take(48)}"
+        }
+        .ifEmpty { listOf("No notes yet") }
+
+    val remindersPreview = state.upcomingReminders
+        .take(2)
+        .map { "${it.title} • ${formatEpochDateTime(it.triggerAt)}" }
+        .ifEmpty { listOf("No upcoming reminders") }
+
+    val subjectsPreview = state.subjects
+        .take(2)
+        .map { it.name }
+        .ifEmpty { listOf("No subjects yet") }
+
+    val filesPreview = state.files
+        .sortedByDescending { it.uploadedAt }
+        .take(2)
+        .map { it.name }
+        .ifEmpty { listOf("No files uploaded") }
+
+    val progressPreview = listOf(
+        "Average progress ${state.averageProgress}%",
+        "Completed ${state.completedTaskCount}/${state.tasks.size} tasks"
+    )
+
+    return listOf(
+        FeatureCardUi(
+            panel = FeaturePanel.Tasks,
+            title = "Tasks",
+            icon = Icons.Filled.AssignmentTurnedIn,
+            accent = Color(0xFF2D9B63),
+            stat = state.openTaskCount.toString(),
+            preview = tasksPreview
+        ),
+        FeatureCardUi(
+            panel = FeaturePanel.Notes,
+            title = "Notes",
+            icon = Icons.Filled.Article,
+            accent = Color(0xFF2F80ED),
+            stat = state.notes.size.toString(),
+            preview = notesPreview
+        ),
+        FeatureCardUi(
+            panel = FeaturePanel.Reminders,
+            title = "Reminders",
+            icon = Icons.Filled.Alarm,
+            accent = Color(0xFFF2994A),
+            stat = state.upcomingReminders.size.toString(),
+            preview = remindersPreview
+        ),
+        FeatureCardUi(
+            panel = FeaturePanel.Subjects,
+            title = "Subjects",
+            icon = Icons.Filled.School,
+            accent = Color(0xFF5C6F82),
+            stat = state.subjects.size.toString(),
+            preview = subjectsPreview
+        ),
+        FeatureCardUi(
+            panel = FeaturePanel.Files,
+            title = "Files",
+            icon = Icons.Filled.Folder,
+            accent = Color(0xFF1F9E96),
+            stat = state.files.size.toString(),
+            preview = filesPreview
+        ),
+        FeatureCardUi(
+            panel = FeaturePanel.Progress,
+            title = "Progress",
+            icon = Icons.Filled.ShowChart,
+            accent = Color(0xFFE06464),
+            stat = "${state.averageProgress}%",
+            preview = progressPreview
+        )
     )
 }
